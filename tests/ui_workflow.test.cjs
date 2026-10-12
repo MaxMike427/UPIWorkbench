@@ -1,0 +1,174 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const vm = require('node:vm');
+const {test} = require('node:test');
+
+const html = fs.readFileSync(path.join(__dirname, '../static/index.html'), 'utf8');
+function createApp() {
+  const js = [...html.matchAll(/<script>([\s\S]*?)<\/script>/g)].at(-1)[1];
+  const context = {localStorage:{getItem:()=>'',setItem(){},removeItem(){}},
+    setTimeout(){},clearTimeout(){},setInterval(){},clearInterval(){},
+    URLSearchParams,URL,Blob,console,confirm:()=>true,fetch:async()=>{throw Error('unexpected HTTP')},
+    window:{},document:{},Date};
+  vm.createContext(context);
+  vm.runInContext(js,context);
+  return context.app();
+}
+
+test('workspace has exactly the five requested modules', () => {
+  const app = createApp();
+  assert.deepEqual(Array.from(app.navs,n=>n.label), ['仪表盘','账号库','任务管理','成功库','设置']);
+  const sections = [...html.matchAll(/<section[^>]*x-show="tab==='([^']+)'"/g)].map(m=>m[1]);
+  assert.deepEqual(sections.sort(),['batches','credentials','dashboard','settings','successes'].sort());
+});
+
+test('dashboard entry loads both real stats and terminal logs', async () => {
+  const app = createApp();
+  const calls = [];
+  app.loadStats=async()=>calls.push('stats');
+  app.loadRuntimeLogs=async()=>calls.push('logs');
+  await app.go('dashboard');
+  assert.ok(calls.includes('stats') && calls.includes('logs'));
+});
+
+test('creation wizard keeps selection on return and creates only one task if start fails', async () => {
+  const app = createApp();
+  app.selCred=[2,5];
+  app.beginTaskCreation();
+  app.nextTaskStep();
+  assert.equal(app.taskStep,2);
+  app.previousTaskStep();
+  assert.equal(app.taskStep,1);
+  assert.deepEqual(Array.from(app.selCred),[2,5]);
+  app.nextTaskStep();
+  let creates=0, starts=0;
+  app.api=async(url)=> {
+    if(url==='/api/batches') { creates++;return {id:17}; }
+    if(url==='/api/batches/17/start') { starts++;if(starts===1)throw Error('兑换码未配置');return {ok:true}; }
+    return {items:[],total:0};
+  };
+  app.loadStats=async()=>{};app.openBatch=async()=>{};app.loadBatches=async()=>{};
+  await app.createSelectedTask();
+  assert.equal(app.createdTaskId,17);
+  assert.equal(app.taskStep,2);
+  await app.createSelectedTask();
+  assert.equal(creates,1);assert.equal(starts,2);
+});
+
+test('downloads send authorization instead of opening a cookie-only URL', async () => {
+  const app=createApp();
+  app.selectedSuccess=[1,3];
+  const downloads=[];
+  app.downloadTxt=async(url,name)=>downloads.push({url,name});
+  await app.exportSuccesses();
+  assert.equal(downloads.length,1);
+  assert.ok(downloads[0].url.includes('ids=1,3'));
+  assert.ok(downloads[0].name.endsWith('.txt'));
+});
+
+test('settings contain two editable codes and separate password/concurrency forms', async () => {
+  const app=createApp();
+  app.api=async()=>[
+    {key:'sms_provider.cdk',value:'****',masked:true},
+    {key:'upi_provider.cdk',value:'****',masked:true},
+    {key:'app.concurrency',value:'7',masked:false},
+    {key:'qualification.api_url',value:'https://hidden.example',masked:false}];
+  await app.loadConfigs();
+  assert.deepEqual(Array.from(app.configs,c=>c.key),['sms_provider.cdk','upi_provider.cdk']);
+  assert.ok(app.configs.every(c=>c.value===''));
+  assert.equal(app.concurrencyValue,'7');
+});
+
+test('single and multiple JSON downloads select CPA, sub2api or both', async () => {
+  const app=createApp();
+  const downloads=[];
+  app.downloadTxt=async(url,name)=>downloads.push({url,name});
+  app.selectedSuccess=[1,3];
+  app.archiveFormat='both';
+  await app.downloadSuccessJson();
+  assert.ok(downloads[0].url.includes('ids=1,3'));
+  assert.ok(downloads[0].url.includes('format=both'));
+  await app.downloadSuccessJson(3,'cpa');
+  assert.ok(downloads[1].url.includes('ids=3'));
+  assert.ok(downloads[1].url.includes('format=cpa'));
+  assert.ok(downloads.every(d=>d.name.endsWith('.zip')));
+});
+
+test('delete actions use correct APIs and password form has no purchase button', async () => {
+  const app=createApp();const calls=[];
+  app.api=async(url,opt)=>{calls.push([url,opt]);return {deleted:2};};
+  app.loadCreds=async()=>{};app.loadStats=async()=>{};app.loadBatches=async()=>{};
+  app.selCred=[1,2];
+  await app.deleteSelectedAccounts();
+  assert.equal(calls[0][0],'/api/credentials/batch-delete');
+  assert.deepEqual(JSON.parse(calls[0][1].body),{ids:[1,2]});
+  await app.deleteTask(3);
+  assert.equal(calls[1][0],'/api/batches/3');
+  assert.equal(calls[1][1].method,'DELETE');
+  const passwordForm=html.match(/<form[^>]*@submit\.prevent="changePassword\(\)"[\s\S]*?<\/form>/)[0];
+  assert.ok(!passwordForm.includes('去购买'));
+});
+
+test('account page size uses 10,20,50,100 and does not lose selection', async () => {
+  const app=createApp();
+  app.selCred=[1,3];
+  const calls=[];
+  app.api=async(url)=>{calls.push(url);return {items:[],total:200};};
+  app.credPage=4;
+  app.credPageSize=50;
+  await app.changeCredPageSize();
+  assert.equal(app.credPage,1);
+  assert.ok(calls[0].includes('page_size=50'));
+  assert.deepEqual(Array.from(app.selCred),[1,3]);
+  for (const size of [10,20,50,100])assert.ok(html.includes('<option value="'+size+'">'+size));
+});
+
+test('account library polling refreshes statuses without resetting selection', async () => {
+  const app=createApp();
+  app.token='test';app.tab='credentials';app.selCred=[1];
+  let reads=0;
+  app.loadCreds=async()=>reads++;
+  await app.tick();
+  assert.equal(reads,1);
+  assert.deepEqual(Array.from(app.selCred),[1]);
+});
+
+test('concurrency control only saves nonzero positive integers', async () => {
+  const app=createApp();
+  const calls=[];
+  app.api=async(url,opt)=>calls.push({url,opt});
+  for(const value of ['','0','-1','1.2','1e2','abc']){
+    app.concurrencyValue=value;
+    await app.saveConcurrency();
+  }
+  assert.equal(calls.length,0);
+  app.concurrencyValue='6';
+  await app.saveConcurrency();
+  assert.equal(calls[0].url,'/api/configs/app.concurrency');
+  assert.deepEqual(JSON.parse(calls[0].opt.body),{value:'6'});
+});
+
+test('purchase and CDK action links are hardcoded at their requested locations', () => {
+  const accounts=html.match(/<section x-show="tab==='credentials'"[\s\S]*?<\/section>/)[0];
+  const settings=html.match(/<template x-for="c in configs"[\s\S]*?<\/template>/)[0];
+  const links=[
+    [accounts,'https://wzyp.cn/shop/CPZF8PBK','去购买 · 0217'],
+    [accounts,'https://wzyp.cn/shop/8UOIIRW2','去购买 · AI 批发商'],
+    [settings,'https://wzyp.cn/shop/8Q9RHH0W','去购买'],
+    [settings,'https://apihub.space/handy/','CDK 融合'],
+    [settings,'https://wzyp.cn/shop/Camellia','去购买'],
+    [settings,'https://upi.xxsyun.xyz/employer/tickets/','提交 CDK'],
+  ];
+  for(const [section,url,label] of links){
+    const anchor=[...section.matchAll(/<a\b([^>]*)>([^<]*)<\/a>/g)].find(m=>m[1].includes('href="'+url+'"'));
+    assert.ok(anchor,'missing direct link: '+url);
+    assert.equal(anchor[2],label);
+    assert.ok(anchor[1].includes('target="_blank"'));
+    assert.ok(anchor[1].includes('rel="noopener noreferrer"'));
+    assert.ok(!anchor[1].includes('@click'));
+  }
+  assert.ok(settings.indexOf('shop/8Q9RHH0W')<settings.indexOf('https://apihub.space/handy/'));
+  assert.ok(settings.indexOf('shop/Camellia')<settings.indexOf('https://upi.xxsyun.xyz/employer/tickets/'));
+  assert.ok(!accounts.includes('purchaseLink()') && !settings.includes('purchaseLink()'));
+});

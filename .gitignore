@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+data/*.sqlite
+data/*.sqlite-*
+data/account_exports/
+logs/
+doc/task_reports/
+doc/*账号*.txt
+config.yaml
+.env
+
+# Local/browser acceptance artifacts
+*.zip
+*.json
+*.md.tmp

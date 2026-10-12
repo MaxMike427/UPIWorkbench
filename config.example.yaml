@@ -1,0 +1,27 @@
+app:
+  title: "UPI Workbench"
+  host: "127.0.0.1"
+  port: 8000
+  data_dir: "./data"
+  db_path: "./data/db.sqlite"
+  jwt_secret: "CHANGE_ME_TO_RANDOM_32BYTES"
+  access_token_expire_minutes: 15
+  refresh_token_expire_days: 7
+  admin_username: "admin"
+  # 首次启动时若 admins 表为空，则用此密码创建管理员；生产环境启动后请删除此项
+  admin_password: "admin123"
+  purchase_url: "{购买网址}"
+
+# 第三方平台配置（M3-M5 使用，M1 仅存储不调用）
+qualification:
+  api_url: "https://cha.nerver.cc"
+  api_key: ""
+  promo_id: "plus-1-month-free"
+sms_provider:
+  base_url: "https://apihub.space/handy"
+  cdk: ""
+upi_provider:
+  provider: "ytc"
+  base_url: "https://ytc.xxsyun.xyz"
+  api_key: ""
+  cdk: ""
