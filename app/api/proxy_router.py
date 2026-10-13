@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..auth import get_current_admin
 from ..database import get_db, log_action
-from ..models import ProxyFreeImportRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
-from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, import_free_proxies, save_proxies, test_proxies, test_proxy
+from ..models import ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
+from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, save_proxies, test_proxies, test_proxy
 
 router=APIRouter(prefix='/api/proxies',tags=['proxies'])
 
@@ -27,15 +27,6 @@ async def add_proxies(body:ProxyImportRequest,request:Request,admin:dict=Depends
     try:result=await append_proxies(db,body.text,body.enabled)
     except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
     await log_action(db,admin['id'],'proxy_add','proxies',None,f"count={result['total']}",request.client.host if request.client else '')
-    return result
-
-
-@router.post('/import-free')
-async def import_free(body:ProxyFreeImportRequest,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
-    current=await get_proxies(db)
-    try:result=await import_free_proxies(db,body.protocol,body.country_code,body.count,current['enabled'])
-    except ValueError as e:raise HTTPException(status_code=502,detail=str(e))
-    await log_action(db,admin['id'],'proxy_import_free','proxies',None,f"protocol={body.protocol},count={body.count}",request.client.host if request.client else '')
     return result
 
 

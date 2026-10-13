@@ -2,6 +2,7 @@
 import asyncio
 import json
 import ssl
+from pathlib import Path
 
 import aiosqlite
 import httpx
@@ -162,16 +163,15 @@ def scheme_recorder(used):
     return wrapper
 
 
-def test_free_proxy_import_normalizes_protocol_and_country_request(client,monkeypatch):
-    h=_login(client);calls=[]
+def test_free_proxy_import_is_removed(client,monkeypatch):
+    h=_login(client);called=[]
     async def get(self,url,**kwargs):
-        calls.append((url,kwargs['params']))
-        return httpx.Response(200,json={'code':200,'message':'success','data':{'proxies':['10.0.0.1:8080','10.0.0.2:1080'],'count':2}},request=httpx.Request('GET',url))
+        called.append(str(url));return httpx.Response(200,json={},request=httpx.Request('GET',url))
     monkeypatch.setattr(httpx.AsyncClient,'get',get)
-    r=client.post('/api/proxies/import-free',headers=h,json={'protocol':'socks5','country_code':'CN','count':2})
-    assert r.status_code==200,r.text
-    assert calls==[('https://proxy.scdn.io/api/get_proxy.php',{'protocol':'socks5','country_code':'CN','count':2})]
-    assert [p['url'] for p in r.json()['items']]==['socks5://10.0.0.1:8080','socks5://10.0.0.2:1080']
+    assert client.post('/api/proxies/import-free',headers=h,json={'protocol':'socks5'}).status_code==405
+    assert called==[]
+    text=Path(__file__).parents[1].joinpath('static/index.html').read_text()
+    assert '免费代理导入' not in text and 'import-free' not in text
 
 
 def test_proxy_library_can_store_socks4_but_new_ytc_task_rejects_it(client):

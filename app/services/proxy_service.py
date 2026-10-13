@@ -9,7 +9,6 @@ from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-FREE_ENDPOINT='https://proxy.scdn.io/api/get_proxy.php'
 PROBE_TARGET='https://api.ipify.org?format=json'
 PROBE_TIMEOUT=6.0
 PROBE_CONCURRENCY=8
@@ -159,29 +158,3 @@ async def test_proxies(db,ids:list[int],concurrency:int=PROBE_CONCURRENCY)->list
             except ValueError as e:return {'id':pid,'ok':False,'error':str(e)}
             except Exception:return {'id':pid,'ok':False,'error':'测试失败，请稍后重试'}
     return list(await asyncio.gather(*(run(pid) for pid in unique)))
-
-
-async def import_free_proxies(db,protocol:str,country_code:str,count:int,enabled:bool)->dict:
-    params={'protocol':protocol,'country_code':'all' if country_code.lower()=='all' else country_code.upper(),'count':count}
-    try:
-        async with httpx.AsyncClient(timeout=15.0,follow_redirects=False,trust_env=False) as client:
-            response=await client.get(FREE_ENDPOINT,params=params)
-            data=response.json()
-    except (httpx.HTTPError,ValueError):raise ValueError('免费代理服务暂时不可用')
-    if response.status_code>=400 or not isinstance(data,dict) or data.get('code') not in (200,0):
-        raise ValueError('免费代理服务返回异常')
-    values=((data.get('data') or {}).get('proxies') or [])
-    def as_proxy(value):
-        if isinstance(value,dict):
-            raw=value.get('proxy') or value.get('address') or value.get('url')
-            if not raw and value.get('ip') and value.get('port'):raw=f"{value['ip']}:{value['port']}"
-            detected=str(value.get('protocol') or value.get('type') or '').lower()
-        elif isinstance(value,str):
-            raw=value;detected=''
-        else:return ''
-        if not raw:return ''
-        if '://' in raw:return raw
-        scheme=detected if detected in ('http','https','socks4','socks5') else ('http' if protocol=='all' else protocol)
-        return f'{scheme}://{raw}'
-    text='\n'.join(item for value in values if (item:=as_proxy(value)))
-    return await append_proxies(db,text,enabled)

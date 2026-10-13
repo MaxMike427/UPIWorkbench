@@ -114,20 +114,6 @@ class ProxyImportRequest(BaseModel):
     enabled: bool = False
 
 
-class ProxyFreeImportRequest(BaseModel):
-    protocol: Literal['all','http','https','socks4','socks5'] = 'all'
-    country_code: str = Field(default='all', min_length=2, max_length=3)
-    count: int = Field(default=10, ge=1, le=20)
-
-    @field_validator('country_code')
-    @classmethod
-    def valid_country_code(cls,value):
-        value=value.strip().lower()
-        if value!='all' and (len(value)!=2 or not value.isalpha()):
-            raise ValueError('国家代码必须为 all 或两位字母代码')
-        return value
-
-
 class ProxyIdsRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
 
