@@ -174,7 +174,7 @@ DEFAULT_CONFIGS = [
     ("extract_provider.base_url", "https://ytc.xxsyun.xyz", "提炼平台接口地址"),
     ("extract_provider.cdk", "", "提炼平台兑换码"),
     ("payment_provider.provider", "ytc", "支付服务商"),
-    ("payment_provider.base_url", "https://upi.xxsyun.xyz", "支付平台接口地址"),
+    ("payment_provider.base_url", "https://masi.cc.cd", "支付平台接口地址"),
     ("payment_provider.cdk", "", "支付平台兑换码"),
     ("app.concurrency", "3", "并发控制"),
     ("sms_provider.cdk", "", "接码平台兑换码"),

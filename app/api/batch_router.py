@@ -24,7 +24,7 @@ async def create_batch(body: BatchCreate, request: Request,
     svc = BatchService(get_db_path())
     try:
         bid = await svc.create_batch(body.name, body.credential_ids,
-                                     amount=body.amount, note=body.note)
+                                     amount=body.amount, note=body.note, auto_push=body.auto_push)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     await log_action(db, admin["id"], "create_batch", "batch", bid, body.name,
@@ -39,9 +39,13 @@ def _out(prog: dict) -> dict:
             "current_step": prog.get("current_step"), "progress_json": prog.get("progress_json"),
             "amount": prog.get("amount") or 0, "note": prog.get("note") or "",
             "members": prog.get("members") or [], "source_batch_id": prog.get("source_batch_id"),
-            "report_available":bool(prog.get("report_path")),
-            "sms_enabled":prog.get('sms_enabled',True),'proxy_enabled':prog.get('proxy_enabled',False),
-            'integration_enabled':prog.get('integration_enabled',False)}
+             "report_available":bool(prog.get("report_path")),
+             "sms_enabled":prog.get('sms_enabled',True),'proxy_enabled':prog.get('proxy_enabled',False),
+             'integration_enabled':prog.get('integration_enabled',False),
+             'auto_push':prog.get('auto_push',True),
+             'extract_provider':prog.get('extract_provider','ytc'),
+             'payment_provider':prog.get('payment_provider','ytc'),
+             'sms_provider':prog.get('sms_provider','handy')}
 
 
 @router.get("", response_model=PageOut[BatchOut])
@@ -61,7 +65,7 @@ async def list_batches(page: int = Query(default=1, ge=1),
         r["members"] = []
         r["report_available"] = bool(r.pop("report_path",None))
         snapshot=json.loads(r.pop('snapshot_json') or '{}')
-        r.update({key:snapshot.get(key,key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled')})
+        r.update({key:snapshot.get(key,key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider')})
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 

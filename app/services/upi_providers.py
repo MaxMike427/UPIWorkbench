@@ -88,11 +88,11 @@ class LocalUPIProvider:
         self.on_progress=None
         self.on_submitted=None
 
-    async def fetch_link(self, at, concurrency=1, job_id=None):
+    async def fetch_link(self, at, concurrency=1, job_id=None, account_email=""):
         if self.extract_func is None:
             raise RuntimeError("本地提炼依赖未安装（curl_cffi/upi-zero-link）")
         import asyncio
-        account={"email":"","access_token":at.strip(),"session_token":""}
+        account={"email":account_email or "","access_token":at.strip(),"session_token":""}
         proxy=self.proxies[0] if self.proxies else ""
         result=await asyncio.to_thread(self.extract_func, account, proxy)
         if isinstance(result, dict) and result.get("ok"):
@@ -104,6 +104,62 @@ class LocalUPIProvider:
             return link, {"provider":"local","result":result}
         reason=result.get("error") if isinstance(result, dict) else "local failed"
         raise RuntimeError(str(reason))
+
+
+class MasiPaymentProvider:
+    """Masi 扫码支付适配器：提交 Stripe UPI 链接并轮询订单终态。"""
+    def __init__(self, base_url: str, cdk: str, timeout: float = 600.0,
+                 poll_interval: float = 5.0):
+        self.base_url = base_url.rstrip("/")
+        self.cdk = cdk or ""
+        self.timeout = timeout
+        self.poll_interval = max(0.0, poll_interval)
+        self.should_continue = None
+        self.on_progress = None
+
+    async def create_or_wait(self, link: str, access_token: str, email: str = "") -> dict:
+        headers = {"Content-Type": "application/json", "User-Agent": "UPIWorkbench/1.2"}
+        body = {"ticket": self.cdk, "link": link, "access_token": access_token,
+                "email": email, "require_online_workers": True}
+        async with httpx.AsyncClient() as client:
+            response = await client.post(f"{self.base_url}/api/scan-orders", json=body,
+                                         headers=headers, timeout=30.0)
+            try:
+                data = response.json()
+            except Exception as exc:
+                raise RuntimeError(f"支付服务返回非 JSON（HTTP {response.status_code}）") from exc
+            if response.status_code not in (200, 201) or not isinstance(data, dict) or not data.get("ok"):
+                raise RuntimeError(str(data.get("error") or f"支付订单创建失败（HTTP {response.status_code}）")[:300])
+            order = data.get("order") or {}
+            order_id = str(order.get("order_id") or "")
+            order_secret = str(data.get("order_secret") or "")
+            if not order_id or not order_secret:
+                raise RuntimeError("支付服务未返回订单凭据")
+            deadline = time.monotonic() + self.timeout
+            while time.monotonic() < deadline:
+                if self.should_continue and not await self.should_continue():
+                    return {"status": "paused", "order_id": order_id}
+                await asyncio.sleep(self.poll_interval)
+                query = await client.get(f"{self.base_url}/api/orders/{order_id}",
+                                         headers={"X-Order-Secret": order_secret,
+                                                  "User-Agent": headers["User-Agent"]},
+                                         timeout=30.0)
+                try:
+                    queried = query.json()
+                except Exception:
+                    queried = {}
+                current = queried.get("order") if isinstance(queried, dict) else {}
+                current = current if isinstance(current, dict) else {}
+                status = str(current.get("status") or queried.get("status") or "").lower()
+                if self.on_progress:
+                    await self.on_progress(f"支付服务：订单 {status or '处理中'}")
+                if status == "completed":
+                    return {"status": "success", "order_id": order_id, "raw": queried}
+                if status in {"failed", "expired", "cancelled"}:
+                    return {"status": "failed", "order_id": order_id,
+                            "error_msg": str(current.get("message") or current.get("error") or status)[:300],
+                            "raw": queried}
+            return {"status": "failed", "order_id": order_id, "error_msg": "支付订单查询超时"}
 
 class YtcUPIProvider:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0,

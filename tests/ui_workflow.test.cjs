@@ -67,15 +67,16 @@ test('downloads send authorization instead of opening a cookie-only URL', async 
   assert.ok(downloads[0].name.endsWith('.txt'));
 });
 
-test('settings contain two editable codes and separate password/concurrency forms', async () => {
+test('settings contain separate SMS, extraction and payment code forms', async () => {
   const app=createApp();
   app.api=async()=>[
     {key:'sms_provider.cdk',value:'****',masked:true},
-    {key:'upi_provider.cdk',value:'****',masked:true},
+    {key:'extract_provider.cdk',value:'****',masked:true},
+    {key:'payment_provider.cdk',value:'****',masked:true},
     {key:'app.concurrency',value:'7',masked:false},
     {key:'qualification.api_url',value:'https://hidden.example',masked:false}];
   await app.loadConfigs();
-  assert.deepEqual(Array.from(app.configs,c=>c.key),['sms_provider.cdk','upi_provider.cdk']);
+  assert.deepEqual(Array.from(app.configs,c=>c.key),['sms_provider.cdk','extract_provider.cdk','payment_provider.cdk']);
   assert.ok(app.configs.every(c=>c.value===''));
   assert.equal(app.concurrencyValue,'7');
 });

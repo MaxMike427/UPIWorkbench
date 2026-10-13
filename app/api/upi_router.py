@@ -18,6 +18,31 @@ async def _cfg(db, key: str, default: str = "") -> str:
     return row["value"] if row else default
 
 
+async def _provider_settings(db) -> dict:
+    """读取 v1.2.0 的提炼/支付分离配置，并兼容 v1.1.0 键。"""
+    legacy = await _cfg(db, "upi_provider.provider", "ytc")
+    extract = await _cfg(db, "extract_provider.provider", "") or legacy
+    if extract == "ytc" and legacy not in ("", "ytc"):
+        extract = legacy
+    payment = await _cfg(db, "payment_provider.provider", "") or extract
+    if extract == legacy and legacy not in ("", "ytc") and payment == "ytc":
+        payment = extract
+    if extract == "local_zero_link":
+        extract = "local"
+    return {
+        "provider": extract,
+        "extract_provider": extract,
+        "payment_provider": payment,
+        "base_url": await _cfg(db, "extract_provider.base_url", "")
+                    or await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz"),
+        "payment_base_url": await _cfg(db, "payment_provider.base_url", "https://masi.cc.cd"),
+        "payment_cdk": await _cfg(db, "payment_provider.cdk", ""),
+        "key": await _cfg(db, "extract_provider.cdk", "")
+               or await _cfg(db, "upi_provider.cdk", "")
+               or await _cfg(db, "upi_provider.api_key", ""),
+    }
+
+
 def _public(task: dict) -> dict:
     t = dict(task)
     # 原始平台响应仅留在本地 DB，可能包含账号 token 或代理认证 URI。
@@ -27,6 +52,11 @@ def _public(task: dict) -> dict:
 
 
 async def _ytc_proxies(db,provider):
+    if provider=='local':
+        if await _cfg(db,'proxy.enabled')!='true':
+            return []
+        async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:
+            return [r['url'] async for r in cur]
     if provider!='ytc':return None
     async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
     if await _cfg(db,'proxy.enabled')!='true' or not proxies:
@@ -46,15 +76,18 @@ async def create(body: UPICreateRequest, request: Request,
             ids = [r["id"] async for r in cur]
     if not ids:
         raise HTTPException(status_code=400, detail="请提供 credential_ids 或有效的 status 筛选")
-    provider = await _cfg(db, "upi_provider.provider", "ytc")
+    settings = await _provider_settings(db)
+    provider = settings["provider"]
     proxies=await _ytc_proxies(db,provider)
-    ytc_base = await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz")
-    ytc_key = await _cfg(db, "upi_provider.cdk", "") or await _cfg(db, "upi_provider.api_key", "")
+    ytc_base = settings["base_url"]
+    ytc_key = settings["key"]
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
     try:
-        svc = UPIService(db=db, provider=provider, ytc_base_url=ytc_base, ytc_api_key=ytc_key,
+        svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
+                         payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
+                         payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id, concurrency=body.concurrency,
                          max_retries=body.max_retries, retry_interval=body.retry_interval_s,ytc_proxies=proxies)
@@ -100,15 +133,18 @@ async def get_task(task_id: int, admin: dict = Depends(get_current_admin), db=De
 @router.post("/tasks/{task_id}/retry")
 async def retry(task_id: int, request: Request,
                 admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    provider = await _cfg(db, "upi_provider.provider", "ytc")
+    settings = await _provider_settings(db)
+    provider = settings["provider"]
     proxies=await _ytc_proxies(db,provider)
-    ytc_base = await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz")
-    ytc_key = await _cfg(db, "upi_provider.cdk", "") or await _cfg(db, "upi_provider.api_key", "")
+    ytc_base = settings["base_url"]
+    ytc_key = settings["key"]
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
     try:
-        svc = UPIService(db=db, provider=provider, ytc_base_url=ytc_base, ytc_api_key=ytc_key,
+        svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
+                         payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
+                         payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id,ytc_proxies=proxies)
     except RuntimeError as e:

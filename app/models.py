@@ -85,6 +85,7 @@ class BatchCreate(BaseModel):
     credential_ids: list[int] = Field(min_length=1)
     amount: int = Field(default=0, ge=0, description="提链金额(paise)")
     note: str = ""
+    auto_push: bool = True
 
 
 class BatchOut(BaseModel):
@@ -102,6 +103,10 @@ class BatchOut(BaseModel):
     sms_enabled: bool = True
     proxy_enabled: bool = False
     integration_enabled: bool = False
+    auto_push: bool = True
+    extract_provider: str = "ytc"
+    payment_provider: str = "ytc"
+    sms_provider: str = "handy"
 
 
 class ProxyUpdate(BaseModel):

@@ -88,12 +88,31 @@ class BatchService:
         concurrency=parse_concurrency(await cfg('app.concurrency','3'))
         qual={'api_url':await cfg('qualification.api_url','https://cha.nerver.cc'),
               'api_key':await cfg('qualification.api_key'),'promo_id':await cfg('qualification.promo_id','plus-1-month-free')}
-        sms={'base_url':await cfg('sms_provider.base_url','https://apihub.space/handy'),'cdk':await cfg('sms_provider.cdk'),
+        sms_provider=await cfg('sms_provider.provider','handy')
+        sms={'provider':sms_provider,'base_url':await cfg('sms_provider.base_url','https://apihub.space/handy'),'cdk':await cfg('sms_provider.cdk'),
               'concurrency':concurrency,'max_retries':None,'retry_interval':120.0}
-        upi_provider=await cfg('upi_provider.provider','ytc')
+        legacy_provider=await cfg('upi_provider.provider','ytc')
+        extract_provider=await cfg('extract_provider.provider','') or legacy_provider
+        # 旧版本用户可能已经把 upi_provider.provider 改成 nerver；新默认值不能覆盖该选择。
+        if extract_provider=='ytc' and legacy_provider not in ('', 'ytc'):
+            extract_provider=legacy_provider
+        upi_provider=extract_provider
         if upi_provider=='local_zero_link':upi_provider='local'
-        upi={'provider':upi_provider,'ytc_base_url':await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
-             'ytc_api_key':await cfg('upi_provider.cdk') or await cfg('upi_provider.api_key'),
+        payment_provider=await cfg('payment_provider.provider','') or extract_provider
+        if extract_provider==legacy_provider and legacy_provider not in ('', 'ytc') and payment_provider=='ytc':
+            payment_provider=extract_provider
+        extract_cdk=await cfg('extract_provider.cdk')
+        payment_cdk=await cfg('payment_provider.cdk')
+        legacy_cdk=await cfg('upi_provider.cdk') or await cfg('upi_provider.api_key')
+        payment_base_url=await cfg('payment_provider.base_url','https://masi.cc.cd')
+        if payment_provider=='masi' and payment_base_url.rstrip('/')=='https://upi.xxsyun.xyz':
+            payment_base_url='https://masi.cc.cd'
+        upi={'provider':upi_provider,'extract_provider':extract_provider,
+             'payment_provider':payment_provider,
+             'ytc_base_url':await cfg('extract_provider.base_url') or await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
+             'ytc_api_key':extract_cdk or legacy_cdk,
+             'payment_base_url':payment_base_url,
+             'payment_cdk':payment_cdk,
              'wait_for_payment':True,'max_retries':5,'retry_interval':120.0,'concurrency':concurrency}
         return cls(db_path,qual,sms,upi,concurrency=concurrency)
 
@@ -102,7 +121,7 @@ class BatchService:
         db.row_factory=aiosqlite.Row
         return db
 
-    async def create_batch(self,name:str,credential_ids:list[int],amount:int=10000,note:str='')->int:
+    async def create_batch(self,name:str,credential_ids:list[int],amount:int=10000,note:str='',auto_push:bool=True)->int:
         db=await self._connect()
         try:
             ids=list(dict.fromkeys(credential_ids))
@@ -111,7 +130,7 @@ class BatchService:
                                   f" WHERE id IN ({','.join('?' for _ in ids)})",ids) as cur:
                 tokens={r['id']:r['at'] async for r in cur}
             if len(tokens)!=len(ids):raise ValueError('部分选中账号不存在，请刷新账号库重新选择')
-            snapshot=await self._snapshot(db)
+            snapshot=await self._snapshot(db,auto_push=auto_push)
             async with db.execute("INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,amount,note,workflow_version,snapshot_json)"
                                   " VALUES(?,?,'created','created',?,?,?,3,?)",
                                   (name.strip(),len(ids),json.dumps(_counts(['pending']*len(ids))),amount,note,json.dumps(snapshot))) as cur:
@@ -139,29 +158,60 @@ class BatchService:
                 assigned[cid]=fixed[(cid-1)%len(fixed)]
         return assigned
 
-    async def _snapshot(self,db):
+    async def _snapshot(self,db,auto_push=True):
         async with db.execute('SELECT key,value FROM configs') as cur:config={r['key']:r['value'] async for r in cur}
         async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
+        legacy_provider=config.get('upi_provider.provider','ytc')
+        extract_provider=config.get('extract_provider.provider') or legacy_provider
+        if extract_provider=='local_zero_link':extract_provider='local'
+        if extract_provider=='ytc' and legacy_provider not in ('', 'ytc'):
+            extract_provider=legacy_provider
+        payment_provider=config.get('payment_provider.provider') or extract_provider
+        if extract_provider==legacy_provider and legacy_provider not in ('', 'ytc') and payment_provider=='ytc':
+            payment_provider=extract_provider
         return {'sms_enabled':config.get('sms.enabled','true')=='true','proxy_enabled':config.get('proxy.enabled','false')=='true',
                 'proxies':proxies,'integration_enabled':config.get('sub2api.enabled','false')=='true',
-                'integration_url':config.get('sub2api.base_url',''),'integration_template':json.loads(config.get('sub2api.template') or '{}')}
+                'integration_url':config.get('sub2api.base_url',''),'integration_template':json.loads(config.get('sub2api.template') or '{}'),
+                'auto_push':bool(auto_push),'extract_provider':extract_provider,
+                'payment_provider':payment_provider,'sms_provider':config.get('sms_provider.provider','handy')}
 
     @staticmethod
     def _legacy_snapshot():
         """V1.0 任务没有快照，重试必须沿用原流程而非读取当前全局开关。"""
         return {'legacy':True,'sms_enabled':True,'proxy_enabled':False,'proxies':[],
                 'integration_enabled':False,'integration_url':'',
-                'integration_template':{}}
+                'integration_template':{},'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc','sms_provider':'handy'}
 
     async def validate_start(self,db,bid):
         async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(bid,)) as cur:batch=await cur.fetchone()
         if not batch:raise ValueError('任务不存在')
         snapshot=json.loads(batch['snapshot_json'] or '{}')
-        if any(str(proxy).split('://',1)[0].lower() not in ('http','https','socks5') for proxy in snapshot.get('proxies',[])):
-            raise ValueError('任务代理包含 ytc 不支持的协议，仅支持 HTTP/HTTPS/SOCKS5')
+        extract_provider=snapshot.get('extract_provider','ytc')
+        payment_provider=snapshot.get('payment_provider',extract_provider)
+        supported_integrated={'ytc','nerver'}
+        if extract_provider not in ('ytc','nerver','local') and payment_provider != extract_provider:
+            raise ValueError('提炼和支付服务商组合未接入，请选择同一提炼支付一体服务商')
+        if payment_provider != extract_provider and payment_provider!='masi':
+            raise ValueError('提炼和支付服务商组合未接入，请选择同一提炼支付一体服务商')
+        if extract_provider not in ('ytc','nerver','local'):
+            raise ValueError('当前提炼服务商尚未接入自动任务，请选择 ytc、Nerver 或本地提炼')
+        if extract_provider=='local' and payment_provider not in ('masi',):
+            raise ValueError('本地提炼目前仅接入 Masi 支付服务商')
+        if payment_provider not in supported_integrated and payment_provider!='masi':
+            raise ValueError('当前支付服务商暂未接入自动任务，请选择 ytc、Nerver 或 Masi')
+        if payment_provider not in supported_integrated:
+            raise ValueError('当前支付服务商暂未接入自动任务，请选择已接入的提炼支付服务商')
+        allowed_proxy_schemes=('http','https','socks5','socks5h') if extract_provider=='local' else ('http','https','socks5')
+        if any(str(proxy).split('://',1)[0].lower() not in allowed_proxy_schemes for proxy in snapshot.get('proxies',[])):
+            raise ValueError('任务代理协议不受当前服务商支持，仅支持 HTTP/HTTPS/SOCKS5；本地提炼另支持 SOCKS5H')
         if snapshot.get('sms_enabled',True) and not self.sms.get('cdk'):raise ValueError('请先保存接码 CDK，或为新任务关闭接码')
+        if snapshot.get('sms_enabled',True) and self.sms.get('provider','handy')!='handy':
+            raise ValueError('当前接码服务商尚未接入自动任务，请选择 Handy 或关闭接码')
         async with db.execute("SELECT 1 FROM batch_members WHERE batch_id=? AND stage IN ('pending','qualified','upi_failed','qual_failed') LIMIT 1",(bid,)) as cur:requires_payment=await cur.fetchone()
-        if requires_payment and not self.upi.get('ytc_api_key'):raise ValueError('请先保存 ytc 提链支付 CDK')
+        if requires_payment and self.upi.get('provider')=='ytc' and not self.upi.get('ytc_api_key'):
+            raise ValueError('请先保存支付服务商 CDK')
+        if requires_payment and self.upi.get('payment_provider')=='masi' and not self.upi.get('payment_cdk'):
+            raise ValueError('请先保存 Masi 支付 CDK')
         async with db.execute("SELECT m.credential_id FROM batch_members m WHERE m.batch_id=? AND m.stage IN ('pending','qualified','upi_failed','qual_failed')"
                               " AND NOT EXISTS(SELECT 1 FROM upi_tasks u WHERE u.credential_id=m.credential_id AND u.status='processing' AND u.external_job_id IS NOT NULL)",(bid,)) as cur:
             requires_proxy=await cur.fetchone()
@@ -285,7 +335,12 @@ class BatchService:
             svc=UPIService(db=db,**options)
             if hasattr(svc,'provider'):
                 svc.provider.should_continue=keep_running;svc.provider.on_progress=progress
-            task=await svc.create_with_retries(cid,batch['amount'] or 10000,batch['note'] or '',at_token=m['at_snapshot'])
+            if options.get('provider')=='local':
+                task=await svc.create_with_retries(cid,batch['amount'] or 10000,batch['note'] or '',
+                                                   at_token=m['at_snapshot'],account_email=account)
+            else:
+                task=await svc.create_with_retries(cid,batch['amount'] or 10000,batch['note'] or '',
+                                                   at_token=m['at_snapshot'])
             if task.get('status')=='paused':
                 await self._set_status(db,bid,'paused')
                 await progress('原支付订单等待确认，任务已暂停；继续任务将查询原订单')
@@ -304,7 +359,7 @@ class BatchService:
             if good:
                 await db.execute("UPDATE credentials SET status='done',error_msg='',updated_at=? WHERE id=?",(utcnow_iso(),cid));await db.commit()
                 snapshot=json.loads(batch['snapshot_json'] or '{}')
-                if snapshot.get('integration_enabled'):
+                if snapshot.get('integration_enabled') and snapshot.get('auto_push',True):
                     from .integration_service import enqueue_push
                     try:await enqueue_push(db,cid,bid,snapshot)
                     except Exception:
@@ -370,6 +425,6 @@ class BatchService:
             result=dict(row)
             result['members']=[{k:v for k,v in m.items() if k not in ('at_snapshot','proxy_url')} for m in await self._members(db,batch_id)]
             snapshot=json.loads(result.pop('snapshot_json',None) or '{}')
-            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled')})
+            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider')})
             return result
         finally:await db.close()

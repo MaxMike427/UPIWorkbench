@@ -46,18 +46,23 @@ try:
             assert link.get_attribute('target')=='_blank'
             assert link.get_attribute('rel')=='noopener noreferrer'
         sms_form=page.locator('form').filter(has=page.get_by_label('接码 CDK',exact=True))
-        payment_form=page.locator('form').filter(has=page.get_by_label('提链支付 CDK',exact=True))
+        extract_form=page.locator('form').filter(has=page.get_by_label('提炼 CDK',exact=True))
+        payment_form=page.locator('form').filter(has=page.get_by_label('支付 CDK',exact=True))
         check_link(sms_form,'去购买','https://wzyp.cn/shop/8Q9RHH0W')
         check_link(sms_form,'CDK 融合','https://apihub.space/handy/')
+        check_link(extract_form,'去购买','https://wzyp.cn/shop/Camellia')
         check_link(payment_form,'去购买','https://wzyp.cn/shop/Camellia')
-        check_link(payment_form,'提交 CDK','https://upi.xxsyun.xyz/employer/tickets/')
         assert sms_form.get_by_role('link',name='提交 CDK',exact=True).count()==0
+        assert extract_form.get_by_role('link',name='CDK 融合',exact=True).count()==0
         assert payment_form.get_by_role('link',name='CDK 融合',exact=True).count()==0
         page.get_by_label('接码 CDK',exact=True).fill('TEST-SMS-CDK')
-        page.get_by_role('button',name='保存',exact=True).nth(1).click()
+        sms_form.get_by_role('button',name='保存',exact=True).click()
         page.wait_for_function('Alpine.$data(document.body).busy===false')
-        page.get_by_label('提链支付 CDK',exact=True).fill('ohk_test-payment')
-        page.get_by_role('button',name='保存',exact=True).nth(2).click()
+        page.get_by_label('提炼 CDK',exact=True).fill('extract-test-cdk')
+        extract_form.get_by_role('button',name='保存',exact=True).click()
+        page.wait_for_function('Alpine.$data(document.body).busy===false')
+        page.get_by_label('支付 CDK',exact=True).fill('payment-test-cdk')
+        payment_form.get_by_role('button',name='保存',exact=True).click()
         page.wait_for_function('Alpine.$data(document.body).busy===false')
         page.get_by_label('并发数',exact=True).fill('2')
         page.get_by_role('button',name='保存并发数',exact=True).click()

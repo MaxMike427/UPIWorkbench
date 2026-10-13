@@ -20,6 +20,17 @@ SENSITIVE_SUFFIX = (".cdk", ".key", ".api_key", ".admin_key", ".secret", ".passw
 def validate_config(key,value):
     if key in ('sms.enabled','sub2api.enabled','proxy.enabled') and value not in ('true','false'):
         raise ValueError('开关必须为 true 或 false')
+    if key in ('sms_provider.provider','extract_provider.provider','payment_provider.provider','upi_provider.provider'):
+        from ..services.provider_catalog import get_provider
+        item=get_provider(value)
+        if key=='sms_provider.provider' and (not item or item.get('category')!='sms'):
+            raise ValueError('请选择接码服务商目录中的服务商')
+        if key=='extract_provider.provider' and (not item or item.get('category') not in ('extract','extract_pay')):
+            raise ValueError('请选择提炼服务商目录中的服务商')
+        if key=='payment_provider.provider' and (not item or item.get('category') not in ('pay','extract_pay')):
+            raise ValueError('请选择支付服务商目录中的服务商')
+        if key=='upi_provider.provider' and value not in ('nerver','ytc') and not item:
+            raise ValueError('请选择有效的提炼支付服务商')
     if key=='sub2api.base_url' and value:
         from ..services.integration_service import normalize_url
         return normalize_url(value)
