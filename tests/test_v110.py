@@ -34,7 +34,7 @@ def test_proxy_library_accepts_bare_host_port_as_http(client):
     r=client.put('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':True})
     assert r.status_code==200,r.text
     result=client.get('/api/proxies',headers=h).json()
-    assert result['items']==[{'id':1,'url':'http://134.209.144.56:80','protocol':'http','host':'134.209.144.56','port':80}]
+    assert result['items']==[{'id':1,'url':'http://134.209.144.56:80','protocol':'http','host':'134.209.144.56','port':80,'is_dynamic':False}]
 
 
 def test_proxy_library_supports_add_test_and_batch_delete(client,monkeypatch):
@@ -140,6 +140,124 @@ def test_proxy_test_survives_broken_socks_stream(client,monkeypatch):
     assert len(results)==2
     assert results[0]['ok'] is False and results[0]['error']
     assert results[1]['ok'] is True
+
+
+def test_proxy_test_explains_socks5h_is_not_probeable(client):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks5h://proxy.example:1080','enabled':False})
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert result['ok'] is False and 'socks5' in result['error'].lower()
+
+
+def test_dynamic_proxy_is_flagged_and_samples_several_exit_ips(client,monkeypatch):
+    h=_login(client)
+    r=client.post('/api/proxies',headers=h,json={'text':'socks5://165.154.135.29:10000\nsocks5://165.154.135.29:10000','enabled':True,'is_dynamic':True})
+    assert r.status_code==200,r.text
+    body=r.json()
+    assert body['total']==1 and body['items'][0]['is_dynamic'] is True
+    calls=[]
+    async def get(self,url,**kwargs):
+        calls.append(1)
+        return httpx.Response(200,json={'ip':f'203.0.113.{len(calls)}'},request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert len(calls)==3
+    assert result['ok'] is True and result['exit_ips']==['203.0.113.1','203.0.113.2','203.0.113.3']
+    assert result['exit_ip']=='203.0.113.1' and result['is_dynamic'] is True
+
+
+def test_fixed_proxy_samples_once(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False})
+    calls=[]
+    async def get(self,url,**kwargs):
+        calls.append(1)
+        return httpx.Response(200,json={'ip':'203.0.113.9'},request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert len(calls)==1 and result['exit_ips']==['203.0.113.9'] and result['is_dynamic'] is False
+
+
+def test_dynamic_flag_can_be_toggled_and_survives_batch(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks5://165.154.135.29:10000','enabled':False})
+    assert client.put('/api/proxies/1/dynamic',headers=h,json={'is_dynamic':True}).json()['items'][0]['is_dynamic'] is True
+    assert client.get('/api/proxies',headers=h).json()['items'][0]['is_dynamic'] is True
+    monkeypatch.setattr(httpx.AsyncClient,'get',fake_probe({'ip':'203.0.113.30'}))
+    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[1]}).json()['results']
+    assert results[0]['is_dynamic'] is True
+    assert client.put('/api/proxies/1/dynamic',headers=h,json={'is_dynamic':False}).json()['items'][0]['is_dynamic'] is False
+
+
+def test_dynamic_proxy_snapshot_reaches_ytc_as_plain_gateway(client):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks5://165.154.135.29:10000','enabled':True,'is_dynamic':True})
+    client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})
+    client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
+    r=client.post('/api/batches',headers=h,json={'name':'dyn','credential_ids':[1]})
+    detail=client.get('/api/batches/'+str(r.json()['id']),headers=h).json()
+    async def check():
+        async with aiosqlite.connect(client._product_db_path) as db:
+            raw=(await (await db.execute('SELECT snapshot_json FROM task_batches WHERE id=?',(detail['id'],))).fetchone())[0]
+            assert json.loads(raw)['proxies']==['socks5://165.154.135.29:10000']
+    asyncio.run(check())
+
+
+def test_proxy_api_fetch_adds_socks5_gateways_from_url(client,monkeypatch):
+    h=_login(client);calls=[];proxy_service._last_api_fetch=0.0
+    url='http://us.rotgbapi.trustsource.live:8089/gen?zone=custom&ptype=1&region=IN&count=2&proto=socks5&stype=text&split=%0D%0A&sessType=rotating'
+    async def get(self,u,**kwargs):
+        calls.append(str(u))
+        return httpx.Response(200,text='165.154.135.29:10000\r\n',request=httpx.Request('GET',u))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    r=client.post('/api/proxies/fetch-api',headers=h,json={'url':url,'count':2})
+    assert r.status_code==200,r.text
+    body=r.json()
+    assert calls==[url]
+    assert body['added']==1 and body['skipped']==0
+    item=client.get('/api/proxies',headers=h).json()['items'][0]
+    assert item['url']=='socks5://165.154.135.29:10000' and item['is_dynamic'] is True
+
+
+def test_proxy_api_fetch_honours_explicit_protocol_and_skips_duplicates(client,monkeypatch):
+    h=_login(client);proxy_service._last_api_fetch=0.0
+    async def get(self,u,**kwargs):
+        return httpx.Response(200,text='1.2.3.4:8080\n1.2.3.4:8080\n5.6.7.8:1080\n\n',request=httpx.Request('GET',u))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    first=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5','count':10})
+    assert first.status_code==200,first.text
+    assert first.json()['added']==2 and first.json()['fetched']==2
+    proxy_service._last_api_fetch=0.0
+    again=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5','count':10})
+    assert again.status_code==200
+    assert (again.json()['added'],again.json()['skipped'])==(0,2)
+
+
+def test_proxy_api_fetch_enforces_one_second_interval(client,monkeypatch):
+    h=_login(client);proxy_service._last_api_fetch=0.0
+    async def get(self,u,**kwargs):
+        return httpx.Response(200,text='1.2.3.4:8080\n',request=httpx.Request('GET',u))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    monkeypatch.setattr(proxy_service,'API_MIN_INTERVAL',30.0)
+    assert client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'}).status_code==200
+    blocked=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'})
+    assert blocked.status_code==429 and '秒' in blocked.json()['detail']
+
+
+def test_proxy_api_fetch_rejects_unsafe_urls(client,monkeypatch):
+    h=_login(client)
+    for url in ('ftp://proxy.example/gen','http://127.0.0.1:8089/gen','http://192.168.1.10/gen','file:///etc/passwd'):
+        r=client.post('/api/proxies/fetch-api',headers=h,json={'url':url,'protocol':'socks5'})
+        assert r.status_code==400,url
+
+
+def test_proxy_api_fetch_reports_upstream_failure(client,monkeypatch):
+    h=_login(client)
+    async def get(self,u,**kwargs):
+        return httpx.Response(500,text='boom',request=httpx.Request('GET',u))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    r=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'})
+    assert r.status_code==502 and '返回' in r.json()['detail']
 
 
 def test_proxy_batch_test_reports_missing_ids(client,monkeypatch):

@@ -14,9 +14,14 @@ from app.services.upi_service import UPIService
 from app.services.account_export_service import save_account_exports
 
 REMOTE_ACCOUNTS=[]
+PROBE_COUNT=[0]
 
 
 async def integration_get(self,url,**kwargs):
+    if str(url).startswith('http://proxy.example.test:8089/gen'):
+        assert 'proto=socks5' in str(url) and 'params' not in kwargs
+        assert kwargs['headers']['Accept']=='text/plain'
+        return httpx.Response(200,text='165.154.135.29:10000\r\n',request=httpx.Request('GET',url))
     if str(url)=='https://example.com/healthz':
         return httpx.Response(204,request=httpx.Request('GET',url))
     if not str(url).startswith('https://sub2api.example.test/api/v1/admin/'):
@@ -33,7 +38,8 @@ async def integration_get(self,url,**kwargs):
 async def probe_get_result(url):
     assert proxy_service.PROBE_TARGET=='https://api.ipify.org?format=json'
     assert proxy_service.PROBE_TIMEOUT==6.0
-    return {'ok':True,'latency_ms':820,'exit_ip':'203.0.113.7'}
+    PROBE_COUNT[0]+=1
+    return {'ok':True,'latency_ms':800+PROBE_COUNT[0]*20,'exit_ip':f'203.0.113.{PROBE_COUNT[0]}'}
 
 
 async def integration_post(self,url,**kwargs):

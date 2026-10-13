@@ -12,6 +12,10 @@ import httpx
 PROBE_TARGET='https://api.ipify.org?format=json'
 PROBE_TIMEOUT=6.0
 PROBE_CONCURRENCY=8
+DYNAMIC_SAMPLES=3
+API_MAX_COUNT=200
+API_MIN_INTERVAL=1.0
+_last_api_fetch=0.0
 
 
 def parse_proxy(value:str) -> dict:
@@ -43,7 +47,8 @@ def masked_proxy(value:str)->str:
 async def get_proxies(db)->dict:
     async with db.execute("SELECT value FROM configs WHERE key='proxy.enabled'") as cur:row=await cur.fetchone()
     async with db.execute('SELECT * FROM proxies ORDER BY id') as cur:
-        items=[{'id':r['id'],'url':masked_proxy(r['url']),'protocol':r['protocol'],'host':r['host'],'port':r['port']} async for r in cur]
+        items=[{'id':r['id'],'url':masked_proxy(r['url']),'protocol':r['protocol'],'host':r['host'],'port':r['port'],
+                'is_dynamic':bool(r['is_dynamic'])} async for r in cur]
     return {'enabled':bool(row) and row['value']=='true','items':items,'total':len(items)}
 
 
@@ -63,7 +68,7 @@ async def save_proxies(db,text:str,enabled:bool)->dict:
     return await get_proxies(db)
 
 
-async def append_proxies(db,text:str,enabled:bool)->dict:
+async def append_proxies(db,text:str,enabled:bool,is_dynamic:bool=False)->dict:
     async with db.execute('SELECT url FROM proxies') as cur:existing={r['url'] async for r in cur}
     parsed=[];seen=set(existing)
     for i,line in enumerate(text.splitlines(),1):
@@ -73,10 +78,81 @@ async def append_proxies(db,text:str,enabled:bool)->dict:
         if item['url'] not in seen:parsed.append(item);seen.add(item['url'])
     if enabled and not (existing or parsed):raise ValueError('代理库开启时至少需要一个有效代理')
     for item in parsed:
-        await db.execute('INSERT INTO proxies(url,protocol,host,port) VALUES(?,?,?,?)',tuple(item[k] for k in ('url','protocol','host','port')))
+        await db.execute('INSERT INTO proxies(url,protocol,host,port,is_dynamic) VALUES(?,?,?,?,?)',
+                         (*(item[k] for k in ('url','protocol','host','port')),1 if is_dynamic else 0))
     await db.execute("UPDATE configs SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key='proxy.enabled'",('true' if enabled else 'false',))
     await db.commit()
     return await get_proxies(db)
+
+
+async def set_dynamic(db,pid:int,is_dynamic:bool)->dict:
+    async with db.execute('UPDATE proxies SET is_dynamic=? WHERE id=?',(1 if is_dynamic else 0,pid)) as cur:changed=cur.rowcount
+    if not changed:raise ValueError('代理不存在')
+    await db.commit()
+    return await get_proxies(db)
+
+
+class ApiBusy(ValueError):
+    """上游 API 间隔不足，调用方应返回 429。"""
+
+
+class ApiUpstream(ValueError):
+    """上游 API 本身异常，调用方应返回 502。"""
+
+
+def _public_http_url(url:str)->str:
+    from urllib.parse import urlsplit as split
+    from ipaddress import ip_address
+    raw=url.strip()
+    if not raw:raise ValueError('请填写代理 API 地址')
+    if len(raw)>2000:raise ValueError('代理 API 地址过长')
+    if any(ord(char)<33 for char in raw):raise ValueError('代理 API 地址包含无效字符')
+    try:
+        parts=split(raw)
+        host=parts.hostname
+    except ValueError:
+        raise ValueError('代理 API 地址格式无效')
+    if parts.scheme not in ('http','https') or not host:raise ValueError('代理 API 地址必须是 http 或 https')
+    lowered=host.lower()
+    if lowered in ('localhost','localhost.localdomain') or lowered.endswith(('.local','.internal')):raise ValueError('代理 API 地址不能指向本机或内网')
+    try:ip_address(host)
+    except ValueError:pass
+    else:raise ValueError('代理 API 地址不能指向本机或内网')
+    return raw
+
+
+def _api_protocol(url:str,explicit:str|None)->str:
+    if explicit:return explicit
+    match=re.search(r'(?:^|[?&])proto(?:col)?=([a-z0-9]+)',url,re.I)
+    if match and match.group(1).lower() in ('http','https','socks4','socks5'):return match.group(1).lower()
+    return 'http'
+
+
+async def fetch_api_proxies(db,url:str,protocol:str|None=None,is_dynamic:bool=True)->dict:
+    global _last_api_fetch
+    target=_public_http_url(url)
+    scheme=_api_protocol(target,protocol)
+    wait=API_MIN_INTERVAL-(time.monotonic()-_last_api_fetch)
+    if wait>0:raise ApiBusy(f'请等待 {wait:.0f} 秒后再拉取，代理 API 有调用间隔限制')
+    _last_api_fetch=time.monotonic()
+    try:
+        async with httpx.AsyncClient(timeout=20.0,follow_redirects=False,trust_env=False) as client:
+            response=await client.get(target,headers={'Accept':'text/plain'})
+    except (httpx.HTTPError,ValueError):raise ApiUpstream('代理 API 暂时无法访问')
+    if response.status_code>=400:raise ApiUpstream(f'代理 API 返回异常（HTTP {response.status_code}）')
+    entries=[]
+    for line in response.text.splitlines():
+        value=line.strip()
+        if not value or value.startswith('#'):continue
+        entries.append(value if '://' in value else f'{scheme}://{value}')
+        if len(entries)>=API_MAX_COUNT:break
+    existing={item['url'] for item in (await get_proxies(db))['items']}
+    unique=list(dict.fromkeys(entries))
+    fresh=[value for value in unique if value not in existing]
+    result=await append_proxies(db,'\n'.join(fresh),False,is_dynamic)
+    result={'added':len(fresh),'skipped':len(unique)-len(fresh),'fetched':len(unique),'protocol':scheme,
+            'items':result['items'],'total':result['total'],'enabled':result['enabled']}
+    return result
 
 
 async def delete_proxies(db,ids:list[int])->int:
@@ -111,6 +187,8 @@ def _probe_error(error:BaseException)->str:
 
 def _probe_failure(error:BaseException)->str:
     name=type(error).__name__
+    if isinstance(error,ValueError) and 'scheme' in str(error).lower():
+        return f'当前测试不支持该协议（{error}），请改用 socks5'
     if any(klass.__module__.startswith(('anyio','python_socks','httpx_socks')) for klass in type(error).__mro__):
         if 'Timeout' in name:return '连接超时'
         if 'Authentication' in name or 'Protocol' in name:return '代理握手失败，请检查协议或认证信息'
@@ -137,15 +215,25 @@ async def _probe(url:str,timeout:float=PROBE_TIMEOUT)->dict:
 
 
 async def test_proxy(db,pid:int)->dict:
-    async with db.execute('SELECT url,protocol FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
+    async with db.execute('SELECT url,protocol,is_dynamic FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
     if not row:raise ValueError('代理不存在')
+    is_dynamic=bool(row['is_dynamic'])
     schemes=[row['protocol']]+(['http'] if row['protocol']=='https' else [])
-    result={'ok':False,'protocol':row['protocol'],'tested_protocol':row['protocol'],'latency_ms':0}
+    result={'ok':False,'protocol':row['protocol'],'tested_protocol':row['protocol'],'latency_ms':0,'exit_ips':[],'is_dynamic':is_dynamic}
     for index,scheme in enumerate(schemes):
         candidate=row['url'] if index==0 else re.sub(r'^https://',f'http://',row['url'])
-        outcome=await _probe(candidate)
-        result={**result,**outcome,'tested_protocol':scheme}
-        if outcome['ok'] or index==len(schemes)-1:break
+        if is_dynamic:
+            samples=await asyncio.gather(*(_probe(candidate) for _ in range(DYNAMIC_SAMPLES)))
+        else:
+            samples=[await _probe(candidate)]
+        successes=[s for s in samples if s['ok']]
+        exits=list(dict.fromkeys(s['exit_ip'] for s in successes if s['exit_ip']))
+        latency=round(sum(s['latency_ms'] for s in successes)/len(successes)) if successes else samples[0]['latency_ms']
+        result={**result,'ok':bool(successes),'latency_ms':latency,'exit_ips':exits,'exit_ip':exits[0] if exits else None,
+                'tested_protocol':scheme}
+        if not successes and samples[0].get('error'):result={**result,'error':samples[0]['error']}
+        if successes or index==len(schemes)-1:break
+    result['rotating']=is_dynamic and len(result['exit_ips'])>1
     return result
 
 

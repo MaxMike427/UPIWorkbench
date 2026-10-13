@@ -218,6 +218,15 @@ test('proxy library exposes add import free-import batch-delete and row test con
   const section=html.match(/<section x-show="tab==='proxies'"[\s\S]*?<\/section>/)[0];
   for (const label of ['添加代理','导入代理','批量测试','批量删除','测试连接']) assert.match(section,new RegExp(label));
   assert.doesNotMatch(section,/免费代理导入|proxy\.scdn\.io|import-free/);
+  assert.match(section,/动态 IP（网关代理/);
+  assert.match(section,/动态标记/);
+  assert.match(section,/代理 API 地址/);
+  assert.match(section,/拉取并添加/);
+  assert.match(section,/proxy-api-proto/);
+  assert.match(html,/async fetchApiProxies\(\)/);
+  assert.match(html,/拉取 '\+j\.fetched\+'/);
+  assert.match(html,/async toggleProxyDynamic\(proxy\)/);
+  assert.match(html,/exits\.slice\(0,2\)\.join/);
   assert.match(section,/选择全部代理/);
   assert.match(section,/本机经代理实测/);
   assert.doesNotMatch(section,/test_proxy\.php/);

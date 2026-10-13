@@ -124,6 +124,7 @@ CREATE TABLE IF NOT EXISTS proxies (
     protocol TEXT NOT NULL,
     host TEXT NOT NULL,
     port INTEGER NOT NULL,
+    is_dynamic INTEGER NOT NULL DEFAULT 0,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS integration_pushes (
@@ -157,6 +158,7 @@ _MIGRATIONS = [
     ("task_batches", "deleted_at", "ALTER TABLE task_batches ADD COLUMN deleted_at TEXT"),
     ("task_batches", "snapshot_json", "ALTER TABLE task_batches ADD COLUMN snapshot_json TEXT"),
     ("integration_pushes", "next_attempt_at", "ALTER TABLE integration_pushes ADD COLUMN next_attempt_at REAL DEFAULT 0"),
+    ("proxies", "is_dynamic", "ALTER TABLE proxies ADD COLUMN is_dynamic INTEGER NOT NULL DEFAULT 0"),
 ]
 
 DEFAULT_CONFIGS = [
