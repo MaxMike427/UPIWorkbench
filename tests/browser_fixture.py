@@ -18,10 +18,6 @@ PROBE_COUNT=[0]
 
 
 async def integration_get(self,url,**kwargs):
-    if str(url).startswith('http://proxy.example.test:8089/gen'):
-        assert 'proto=socks5' in str(url) and 'params' not in kwargs
-        assert kwargs['headers']['Accept']=='text/plain'
-        return httpx.Response(200,text='165.154.135.29:10000\r\n',request=httpx.Request('GET',url))
     if str(url)=='https://example.com/healthz':
         return httpx.Response(204,request=httpx.Request('GET',url))
     if not str(url).startswith('https://sub2api.example.test/api/v1/admin/'):

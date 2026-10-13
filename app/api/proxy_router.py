@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..auth import get_current_admin
 from ..database import get_db, log_action
-from ..models import DynamicRequest, ProxyApiFetchRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
-from ..services.proxy_service import ApiBusy, ApiUpstream, append_proxies, delete_proxies, fetch_api_proxies, get_proxies, save_proxies, set_dynamic, test_proxies, test_proxy
+from ..models import DynamicRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
+from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, save_proxies, set_dynamic, test_proxies, test_proxy
 
 router=APIRouter(prefix='/api/proxies',tags=['proxies'])
 
@@ -27,16 +27,6 @@ async def add_proxies(body:ProxyImportRequest,request:Request,admin:dict=Depends
     try:result=await append_proxies(db,body.text,body.enabled,body.is_dynamic)
     except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
     await log_action(db,admin['id'],'proxy_add','proxies',None,f"count={result['total']},dynamic={body.is_dynamic}",request.client.host if request.client else '')
-    return result
-
-
-@router.post('/fetch-api')
-async def fetch_api(body:ProxyApiFetchRequest,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
-    try:result=await fetch_api_proxies(db,body.url,body.protocol,body.is_dynamic)
-    except ApiBusy as e:raise HTTPException(status_code=429,detail=str(e))
-    except ApiUpstream as e:raise HTTPException(status_code=502,detail=str(e))
-    except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
-    await log_action(db,admin['id'],'proxy_fetch_api','proxies',None,f"added={result['added']},skipped={result['skipped']},protocol={result['protocol']}",request.client.host if request.client else '')
     return result
 
 

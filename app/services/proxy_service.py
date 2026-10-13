@@ -5,7 +5,7 @@ import asyncio
 import re
 import ssl
 import time
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
 
@@ -13,14 +13,25 @@ PROBE_TARGET='https://api.ipify.org?format=json'
 PROBE_TIMEOUT=6.0
 PROBE_CONCURRENCY=8
 DYNAMIC_SAMPLES=3
-API_MAX_COUNT=200
-API_MIN_INTERVAL=1.0
-_last_api_fetch=0.0
+
+
+_COLON_CREDENTIAL=re.compile(r'^(?P<scheme>[a-z0-9+.-]*://)?(?P<host>[^:\[\]/@]+):(?P<port>\d{1,5}):(?P<user>[^:@/\s]+):(?P<pass>[^:@/\s]+)$',re.I)
+
+
+def _from_colon_form(raw:str)->str:
+    """把代理商常见的 host:port:user:pass 文本改写成带协议的 URI。"""
+    match=_COLON_CREDENTIAL.match(raw.strip())
+    if not match:return raw
+    scheme=(match.group('scheme') or 'http://').lower()
+    user=quote(match.group('user'),safe='')
+    password=quote(match.group('pass'),safe='')
+    return f'{scheme}{user}:{password}@{match.group("host")}:{match.group("port")}'
 
 
 def parse_proxy(value:str) -> dict:
     raw=value.strip()
     if raw.startswith('sk5://'):raw='socks5://'+raw[6:]
+    raw=_from_colon_form(raw)
     if '://' not in raw:
         raw='http://'+raw
     if any(ord(char)<33 for char in raw):raise ValueError('代理地址包含无效字符')
@@ -35,6 +46,16 @@ def parse_proxy(value:str) -> dict:
     except ValueError:
         raise ValueError('请填写有效的 HTTP/HTTPS/SOCKS4/SOCKS5 代理 URI 和端口')
     return {'url':urlunsplit((url.scheme,url.netloc,'','','')),'protocol':url.scheme,'host':url.hostname,'port':port}
+
+
+def session_variant(url:str,session_id:str)->str:
+    """为账号分配独立的粘性会话，网关在会话期内固定同一出口 IP。"""
+    parts=urlsplit(url)
+    if parts.username is None or parts.password is None:return url
+    user=parts.username
+    if '-session-' in user:return url
+    host=f'[{parts.hostname}]' if ':' in (parts.hostname or '') else parts.hostname
+    return f'{parts.scheme}://{quote(user+"-session-"+session_id,safe="")}:{quote(parts.password,safe="")}@{host}:{parts.port}'
 
 
 def masked_proxy(value:str)->str:
@@ -90,69 +111,6 @@ async def set_dynamic(db,pid:int,is_dynamic:bool)->dict:
     if not changed:raise ValueError('代理不存在')
     await db.commit()
     return await get_proxies(db)
-
-
-class ApiBusy(ValueError):
-    """上游 API 间隔不足，调用方应返回 429。"""
-
-
-class ApiUpstream(ValueError):
-    """上游 API 本身异常，调用方应返回 502。"""
-
-
-def _public_http_url(url:str)->str:
-    from urllib.parse import urlsplit as split
-    from ipaddress import ip_address
-    raw=url.strip()
-    if not raw:raise ValueError('请填写代理 API 地址')
-    if len(raw)>2000:raise ValueError('代理 API 地址过长')
-    if any(ord(char)<33 for char in raw):raise ValueError('代理 API 地址包含无效字符')
-    try:
-        parts=split(raw)
-        host=parts.hostname
-    except ValueError:
-        raise ValueError('代理 API 地址格式无效')
-    if parts.scheme not in ('http','https') or not host:raise ValueError('代理 API 地址必须是 http 或 https')
-    lowered=host.lower()
-    if lowered in ('localhost','localhost.localdomain') or lowered.endswith(('.local','.internal')):raise ValueError('代理 API 地址不能指向本机或内网')
-    try:ip_address(host)
-    except ValueError:pass
-    else:raise ValueError('代理 API 地址不能指向本机或内网')
-    return raw
-
-
-def _api_protocol(url:str,explicit:str|None)->str:
-    if explicit:return explicit
-    match=re.search(r'(?:^|[?&])proto(?:col)?=([a-z0-9]+)',url,re.I)
-    if match and match.group(1).lower() in ('http','https','socks4','socks5'):return match.group(1).lower()
-    return 'http'
-
-
-async def fetch_api_proxies(db,url:str,protocol:str|None=None,is_dynamic:bool=True)->dict:
-    global _last_api_fetch
-    target=_public_http_url(url)
-    scheme=_api_protocol(target,protocol)
-    wait=API_MIN_INTERVAL-(time.monotonic()-_last_api_fetch)
-    if wait>0:raise ApiBusy(f'请等待 {wait:.0f} 秒后再拉取，代理 API 有调用间隔限制')
-    _last_api_fetch=time.monotonic()
-    try:
-        async with httpx.AsyncClient(timeout=20.0,follow_redirects=False,trust_env=False) as client:
-            response=await client.get(target,headers={'Accept':'text/plain'})
-    except (httpx.HTTPError,ValueError):raise ApiUpstream('代理 API 暂时无法访问')
-    if response.status_code>=400:raise ApiUpstream(f'代理 API 返回异常（HTTP {response.status_code}）')
-    entries=[]
-    for line in response.text.splitlines():
-        value=line.strip()
-        if not value or value.startswith('#'):continue
-        entries.append(value if '://' in value else f'{scheme}://{value}')
-        if len(entries)>=API_MAX_COUNT:break
-    existing={item['url'] for item in (await get_proxies(db))['items']}
-    unique=list(dict.fromkeys(entries))
-    fresh=[value for value in unique if value not in existing]
-    result=await append_proxies(db,'\n'.join(fresh),False,is_dynamic)
-    result={'added':len(fresh),'skipped':len(unique)-len(fresh),'fetched':len(unique),'protocol':scheme,
-            'items':result['items'],'total':result['total'],'enabled':result['enabled']}
-    return result
 
 
 async def delete_proxies(db,ids:list[int])->int:

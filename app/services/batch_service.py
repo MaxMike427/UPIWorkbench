@@ -11,6 +11,7 @@ import aiosqlite
 from ..database import log_runtime
 from ..config import parse_concurrency
 from ..utils.helpers import utcnow_iso
+from .proxy_service import session_variant
 from .qualification_service import QualificationService
 from .sms_service import SMSService
 from .upi_service import UPIService
@@ -113,11 +114,28 @@ class BatchService:
                                   " VALUES(?,?,'created','created',?,?,?,3,?)",
                                   (name.strip(),len(ids),json.dumps(_counts(['pending']*len(ids))),amount,note,json.dumps(snapshot))) as cur:
                 bid=cur.lastrowid
+            proxies=await self._session_proxies(db,ids)
             for cid in ids:
-                await db.execute("INSERT INTO batch_members(batch_id,credential_id,at_snapshot) VALUES(?,?,?)",(bid,cid,tokens[cid]))
+                await db.execute("INSERT INTO batch_members(batch_id,credential_id,at_snapshot,proxy_url) VALUES(?,?,?,?)",
+                                 (bid,cid,tokens[cid],proxies.get(cid)))
             await db.commit()
             return bid
         finally:await db.close()
+
+    @staticmethod
+    async def _session_proxies(db,ids)->dict:
+        """网关型代理按账号分配独立粘性会话，保证同一账号全程固定出口 IP。"""
+        async with db.execute('SELECT url,is_dynamic FROM proxies ORDER BY id') as cur:rows=[dict(r) async for r in cur]
+        if not rows:return {}
+        gateways=[r['url'] for r in rows if r['is_dynamic'] and '@' in r['url']]
+        fixed=[r['url'] for r in rows if r['url'] not in gateways]
+        assigned={}
+        for cid in ids:
+            if gateways:
+                assigned[cid]=session_variant(gateways[(cid-1)%len(gateways)],f'{cid:08d}')
+            elif fixed:
+                assigned[cid]=fixed[(cid-1)%len(fixed)]
+        return assigned
 
     async def _snapshot(self,db):
         async with db.execute('SELECT key,value FROM configs') as cur:config={r['key']:r['value'] async for r in cur}
@@ -163,7 +181,7 @@ class BatchService:
         return bool(row) and row['status']=='running'
 
     async def _members(self,db,bid,stages=None):
-        sql=("SELECT m.credential_id,m.stage,m.error,m.updated_at,m.at_snapshot,m.upi_task_id,m.sms_task_id,c.account"
+        sql=("SELECT m.credential_id,m.stage,m.error,m.updated_at,m.at_snapshot,m.proxy_url,m.upi_task_id,m.sms_task_id,c.account"
              " FROM batch_members m LEFT JOIN credentials c ON c.id=m.credential_id WHERE m.batch_id=?")
         args=[bid]
         if stages:
@@ -260,8 +278,8 @@ class BatchService:
             snapshot=json.loads(batch['snapshot_json'] or '{}')
             options=dict(self.upi)
             if snapshot.get('proxy_enabled') and snapshot.get('proxies'):
-                # 账号稳定分配一条代理，原订单恢复时不再次建单或切换代理。
-                options['ytc_proxies']=[snapshot['proxies'][(cid-1)%len(snapshot['proxies'])]]
+                # 账号固定使用创建任务时分配的代理（含独立粘性会话），原订单恢复时不切换。
+                options['ytc_proxies']=[m['proxy_url'] or snapshot['proxies'][(cid-1)%len(snapshot['proxies'])]]
             svc=UPIService(db=db,**options)
             if hasattr(svc,'provider'):
                 svc.provider.should_continue=keep_running;svc.provider.on_progress=progress
@@ -336,8 +354,8 @@ class BatchService:
                                   (name,len(members),json.dumps(_counts(stages)),source['amount'] or 10000,source['note'] or '',batch_id,
                                    max(3,source['workflow_version']),json.dumps(snapshot))) as cur:new_id=cur.lastrowid
             for m,stage in zip(members,stages):
-                await db.execute('INSERT INTO batch_members(batch_id,credential_id,stage,at_snapshot,upi_task_id) VALUES(?,?,?,?,?)',
-                                 (new_id,m['credential_id'],stage,m['at_snapshot'],m['upi_task_id'] if stage=='paid' else None))
+                await db.execute('INSERT INTO batch_members(batch_id,credential_id,stage,at_snapshot,proxy_url,upi_task_id) VALUES(?,?,?,?,?,?)',
+                                 (new_id,m['credential_id'],stage,m['at_snapshot'],m.get('proxy_url'),m['upi_task_id'] if stage=='paid' else None))
             await db.commit()
             return {'batch_id':new_id,'name':name,'source_batch_id':batch_id}
         finally:await db.close()
@@ -348,7 +366,7 @@ class BatchService:
             async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(batch_id,)) as cur:row=await cur.fetchone()
             if not row:return None
             result=dict(row)
-            result['members']=[{k:v for k,v in m.items() if k!='at_snapshot'} for m in await self._members(db,batch_id)]
+            result['members']=[{k:v for k,v in m.items() if k not in ('at_snapshot','proxy_url')} for m in await self._members(db,batch_id)]
             snapshot=json.loads(result.pop('snapshot_json',None) or '{}')
             result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled')})
             return result

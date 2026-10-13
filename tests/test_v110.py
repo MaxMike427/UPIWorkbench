@@ -203,61 +203,124 @@ def test_dynamic_proxy_snapshot_reaches_ytc_as_plain_gateway(client):
     asyncio.run(check())
 
 
-def test_proxy_api_fetch_adds_socks5_gateways_from_url(client,monkeypatch):
-    h=_login(client);calls=[];proxy_service._last_api_fetch=0.0
-    url='http://us.rotgbapi.trustsource.live:8089/gen?zone=custom&ptype=1&region=IN&count=2&proto=socks5&stype=text&split=%0D%0A&sessType=rotating'
-    async def get(self,u,**kwargs):
-        calls.append(str(u))
-        return httpx.Response(200,text='165.154.135.29:10000\r\n',request=httpx.Request('GET',u))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get)
-    r=client.post('/api/proxies/fetch-api',headers=h,json={'url':url,'count':2})
-    assert r.status_code==200,r.text
-    body=r.json()
-    assert calls==[url]
-    assert body['added']==1 and body['skipped']==0
-    item=client.get('/api/proxies',headers=h).json()['items'][0]
-    assert item['url']=='socks5://165.154.135.29:10000' and item['is_dynamic'] is True
+def test_parse_proxy_accepts_host_port_user_pass():
+    assert proxy_service.parse_proxy('us.proxy.test:10000:USER1-zone-custom-region-IN:pw123')=={
+        'url':'http://USER1-zone-custom-region-IN:pw123@us.proxy.test:10000','protocol':'http',
+        'host':'us.proxy.test','port':10000}
+    assert proxy_service.parse_proxy('socks5://us.proxy.test:10000:USER1-region-IN:pw123')['url']==\
+        'socks5://USER1-region-IN:pw123@us.proxy.test:10000'
 
 
-def test_proxy_api_fetch_honours_explicit_protocol_and_skips_duplicates(client,monkeypatch):
-    h=_login(client);proxy_service._last_api_fetch=0.0
-    async def get(self,u,**kwargs):
-        return httpx.Response(200,text='1.2.3.4:8080\n1.2.3.4:8080\n5.6.7.8:1080\n\n',request=httpx.Request('GET',u))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get)
-    first=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5','count':10})
-    assert first.status_code==200,first.text
-    assert first.json()['added']==2 and first.json()['fetched']==2
-    proxy_service._last_api_fetch=0.0
-    again=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5','count':10})
-    assert again.status_code==200
-    assert (again.json()['added'],again.json()['skipped'])==(0,2)
+def test_parse_proxy_still_rejects_ambiguous_and_short_forms():
+    for bad in ('us.proxy.test:10000:onlyuser','us.proxy.test:10000:user:pw:extra','[::1]:8080:user:pw',''):
+        with pytest.raises(ValueError):
+            proxy_service.parse_proxy(bad)
 
 
-def test_proxy_api_fetch_enforces_one_second_interval(client,monkeypatch):
-    h=_login(client);proxy_service._last_api_fetch=0.0
-    async def get(self,u,**kwargs):
-        return httpx.Response(200,text='1.2.3.4:8080\n',request=httpx.Request('GET',u))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get)
-    monkeypatch.setattr(proxy_service,'API_MIN_INTERVAL',30.0)
-    assert client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'}).status_code==200
-    blocked=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'})
-    assert blocked.status_code==429 and '秒' in blocked.json()['detail']
+def test_session_variant_appends_session_to_username():
+    base='socks5://USER1-zone-custom-region-IN:pw@host.test:10000'
+    assert proxy_service.session_variant(base,'12345678')=='socks5://USER1-zone-custom-region-IN-session-12345678:pw@host.test:10000'
+    assert proxy_service.session_variant(proxy_service.session_variant(base,'12345678'),'99999999').count('session-')==1
+    assert proxy_service.session_variant('socks5://host.test:10000','12345678')=='socks5://host.test:10000'
 
 
-def test_proxy_api_fetch_rejects_unsafe_urls(client,monkeypatch):
+def _member_proxies(client,bid):
+    async def read():
+        async with aiosqlite.connect(client._product_db_path) as db:
+            async with db.execute('SELECT credential_id,proxy_url FROM batch_members WHERE batch_id=? ORDER BY credential_id',(bid,)) as cur:
+                return [tuple(r) for r in await cur.fetchall()]
+    return asyncio.run(read())
+
+
+def _prepare_sticky_batch(client,text,creds):
     h=_login(client)
-    for url in ('ftp://proxy.example/gen','http://127.0.0.1:8089/gen','http://192.168.1.10/gen','file:///etc/passwd'):
-        r=client.post('/api/proxies/fetch-api',headers=h,json={'url':url,'protocol':'socks5'})
-        assert r.status_code==400,url
+    client.post('/api/proxies',headers=h,json={'text':text,'enabled':True,'is_dynamic':True})
+    body='\n'.join(f'{name}@example.com---pw---2FA---eyJ{i}' for i,name in enumerate(creds))
+    client.post('/api/credentials/import',headers=h,files={'file':('a.txt',body)})
+    client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
+    client.put('/api/configs/sms_provider.cdk',headers=h,json={'value':'sms_test'})
+    return h
 
 
-def test_proxy_api_fetch_reports_upstream_failure(client,monkeypatch):
+def test_task_assigns_a_distinct_sticky_session_per_account(client):
+    h=_prepare_sticky_batch(client,'socks5://USER1-zone-custom-region-IN:pw123@us.proxy.test:10000',['a','b'])
+    bid=client.post('/api/batches',headers=h,json={'name':'sticky','credential_ids':[1,2]}).json()['id']
+    urls=[url for _,url in _member_proxies(client,bid)]
+    assert all('session-' in url for url in urls),urls
+    assert len(set(urls))==2,urls
+    assert all(url.startswith('socks5://USER1-zone-custom-region-IN-session-') for url in urls)
+    assert all(url.endswith(':pw123@us.proxy.test:10000') for url in urls)
+
+
+def test_task_keeps_plain_proxy_when_gateway_has_no_credentials(client):
+    h=_prepare_sticky_batch(client,'134.209.144.56:80',['a'])
+    bid=client.post('/api/batches',headers=h,json={'name':'plain','credential_ids':[1]}).json()['id']
+    assert _member_proxies(client,bid)[0][1]=='http://134.209.144.56:80'
+
+
+def test_task_details_never_expose_proxy_credentials(client):
+    h=_prepare_sticky_batch(client,'socks5://USER1-zone-custom-region-IN:pw123@us.proxy.test:10000',['a'])
+    bid=client.post('/api/batches',headers=h,json={'name':'mask','credential_ids':[1]}).json()['id']
+    detail=client.get(f'/api/batches/{bid}',headers=h).json()
+    assert 'pw123' not in json.dumps(detail) and 'USER1' not in json.dumps(detail)
+    assert all('proxy_url' not in m for m in detail['members'])
+
+
+def test_retry_batch_keeps_the_assigned_sticky_session(client):
+    h=_prepare_sticky_batch(client,'socks5://USER1-zone-custom-region-IN:pw123@us.proxy.test:10000',['a'])
+    bid=client.post('/api/batches',headers=h,json={'name':'first','credential_ids':[1]}).json()['id']
+    original=_member_proxies(client,bid)[0][1]
+    async def mark():
+        async with aiosqlite.connect(client._product_db_path) as db:
+            await db.execute("UPDATE task_batches SET status='failed' WHERE id=?",(bid,))
+            await db.execute("UPDATE batch_members SET stage='upi_failed' WHERE batch_id=?",(bid,));await db.commit()
+    asyncio.run(mark())
+    from app.services import batch_service as bs
+    async def retry():
+        svc=bs.BatchService(client._product_db_path)
+        return await svc.create_retry_batch(bid)
+    result=asyncio.run(retry())
+    assert _member_proxies(client,result['batch_id'])[0][1]==original
+
+
+def test_upi_step_uses_the_member_session_proxy(client,monkeypatch):
+    h=_prepare_sticky_batch(client,'socks5://USER1-zone-custom-region-IN:pw123@us.proxy.test:10000',['a'])
+    bid=client.post('/api/batches',headers=h,json={'name':'use','credential_ids':[1]}).json()['id']
+    assigned=_member_proxies(client,bid)[0][1]
+    assert 'session-' in assigned
+    from app.services import batch_service as bs
+    from app.services.qualification_service import CheckOutcome
+    used=[]
+    hit=asyncio.Event()
+    class Qual:
+        def __init__(self,db,**kwargs):pass
+        async def check_single(self,at):return CheckOutcome(True,'eligible',{})
+    class UPI:
+        def __init__(self,db,**kwargs):self.ytc_proxies=kwargs.get('ytc_proxies',[])
+        async def create_with_retries(self,*a,**k):
+            used.extend(self.ytc_proxies);hit.set()
+            return {'status':'failed','error_msg':'stop-after-capture'}
+    monkeypatch.setattr(bs,'QualificationService',Qual)
+    monkeypatch.setattr(bs,'UPIService',UPI)
+    monkeypatch.setattr(bs.SMSService,'bind_with_retries',lambda self,cid:{'status':'failed','error_msg':'unused'})
+    svc=bs.BatchService(client._product_db_path)
+    async def drive():
+        async with aiosqlite.connect(client._product_db_path) as db:
+            await db.execute("UPDATE task_batches SET status='running' WHERE id=?",(bid,));await db.commit()
+        task=asyncio.create_task(svc.run(bid))
+        try:
+            await asyncio.wait_for(hit.wait(),30)
+        finally:
+            await task
+    asyncio.run(drive())
+    assert used==[assigned]
+
+
+def test_proxy_api_fetch_endpoint_is_gone(client):
     h=_login(client)
-    async def get(self,u,**kwargs):
-        return httpx.Response(500,text='boom',request=httpx.Request('GET',u))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get)
-    r=client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen','protocol':'socks5'})
-    assert r.status_code==502 and '返回' in r.json()['detail']
+    assert client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen'}).status_code==405
+    page=Path(__file__).parents[1].joinpath('static/index.html').read_text()
+    assert 'API 拉取' not in page and 'fetch-api' not in page
 
 
 def test_proxy_batch_test_reports_missing_ids(client,monkeypatch):

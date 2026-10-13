@@ -220,11 +220,7 @@ test('proxy library exposes add import free-import batch-delete and row test con
   assert.doesNotMatch(section,/免费代理导入|proxy\.scdn\.io|import-free/);
   assert.match(section,/动态 IP（网关代理/);
   assert.match(section,/动态标记/);
-  assert.match(section,/代理 API 地址/);
-  assert.match(section,/拉取并添加/);
-  assert.match(section,/proxy-api-proto/);
-  assert.match(html,/async fetchApiProxies\(\)/);
-  assert.match(html,/拉取 '\+j\.fetched\+'/);
+  assert.doesNotMatch(section,/API 拉取|proxy-api-url|fetch-api|拉取并添加|代理 API 地址/);
   assert.match(html,/async toggleProxyDynamic\(proxy\)/);
   assert.match(html,/exits\.slice\(0,2\)\.join/);
   assert.match(section,/选择全部代理/);

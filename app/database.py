@@ -113,6 +113,7 @@ CREATE TABLE IF NOT EXISTS batch_members (
     batch_id INTEGER NOT NULL REFERENCES task_batches(id),
     credential_id INTEGER NOT NULL REFERENCES credentials(id),
     stage TEXT DEFAULT 'pending',
+    proxy_url TEXT,
     error TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (batch_id, credential_id)
@@ -159,6 +160,7 @@ _MIGRATIONS = [
     ("task_batches", "snapshot_json", "ALTER TABLE task_batches ADD COLUMN snapshot_json TEXT"),
     ("integration_pushes", "next_attempt_at", "ALTER TABLE integration_pushes ADD COLUMN next_attempt_at REAL DEFAULT 0"),
     ("proxies", "is_dynamic", "ALTER TABLE proxies ADD COLUMN is_dynamic INTEGER NOT NULL DEFAULT 0"),
+    ("batch_members", "proxy_url", "ALTER TABLE batch_members ADD COLUMN proxy_url TEXT"),
 ]
 
 DEFAULT_CONFIGS = [

@@ -119,12 +119,6 @@ class DynamicRequest(BaseModel):
     is_dynamic: bool = False
 
 
-class ProxyApiFetchRequest(BaseModel):
-    url: str = Field(min_length=1, max_length=2000)
-    protocol: Literal['http','https','socks4','socks5'] | None = None
-    is_dynamic: bool = True
-
-
 class ProxyIdsRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=5000)
 
