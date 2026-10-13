@@ -206,7 +206,10 @@ test('manual push reports rejected selected accounts instead of unconditional su
 
 test('success library exposes one manual sub2api push action for selected accounts', () => {
   const section=html.match(/<section x-show="tab==='successes'"[\s\S]*?<\/section>/)[0];
-  assert.match(section,/推送 sub2api/);
+  const exportIndex=section.indexOf('导出选中 TXT');
+  const pushIndex=section.indexOf('推送 sub2api');
+  assert.ok(exportIndex>=0 && pushIndex>exportIndex,'推送按钮应紧邻导出 TXT 按钮');
   assert.match(section,/enqueueSelectedPushes\(\)/);
-  assert.doesNotMatch(section,/推送选中已接码账号/);
+  assert.doesNotMatch(section,/接码成功账号会按任务设置自动推送/);
+  assert.doesNotMatch(section,/已成功未接码账号仅可导出 TXT，不生成 JSON、不推送/);
 });
