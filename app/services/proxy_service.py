@@ -1,7 +1,10 @@
 """代理库：校验 URI，存储真实凭证但只向页面返回脱敏地址。"""
 from __future__ import annotations
 
+import time
 from urllib.parse import urlsplit, urlunsplit
+
+import httpx
 
 
 def parse_proxy(value:str) -> dict:
@@ -12,14 +15,14 @@ def parse_proxy(value:str) -> dict:
     if any(ord(char)<33 for char in raw):raise ValueError('代理地址包含无效字符')
     try:
         url=urlsplit(raw)
-        if url.scheme not in ('http','https','socks5','socks5h') or not url.hostname or not url.port:
+        if url.scheme not in ('http','https','socks4','socks5','socks5h') or not url.hostname or not url.port:
             raise ValueError('格式无效')
         if url.path not in ('','/') or url.query or url.fragment:
             raise ValueError('不支持路径或参数')
         if url.username is not None and url.password is None:raise ValueError('认证信息不完整')
         port=url.port
     except ValueError:
-        raise ValueError('请填写有效的 HTTP/HTTPS/SOCKS5 代理 URI 和端口')
+        raise ValueError('请填写有效的 HTTP/HTTPS/SOCKS4/SOCKS5 代理 URI 和端口')
     return {'url':urlunsplit((url.scheme,url.netloc,'','','')),'protocol':url.scheme,'host':url.hostname,'port':port}
 
 
@@ -51,3 +54,70 @@ async def save_proxies(db,text:str,enabled:bool)->dict:
     await db.execute("UPDATE configs SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key='proxy.enabled'",('true' if enabled else 'false',))
     await db.commit()
     return await get_proxies(db)
+
+
+async def append_proxies(db,text:str,enabled:bool)->dict:
+    async with db.execute('SELECT url FROM proxies') as cur:existing={r['url'] async for r in cur}
+    parsed=[];seen=set(existing)
+    for i,line in enumerate(text.splitlines(),1):
+        if not line.strip():continue
+        try:item=parse_proxy(line)
+        except ValueError as e:raise ValueError(f'第 {i} 行：{e}')
+        if item['url'] not in seen:parsed.append(item);seen.add(item['url'])
+    if enabled and not (existing or parsed):raise ValueError('代理库开启时至少需要一个有效代理')
+    for item in parsed:
+        await db.execute('INSERT INTO proxies(url,protocol,host,port) VALUES(?,?,?,?)',tuple(item[k] for k in ('url','protocol','host','port')))
+    await db.execute("UPDATE configs SET value=?,updated_at=CURRENT_TIMESTAMP WHERE key='proxy.enabled'",('true' if enabled else 'false',))
+    await db.commit()
+    return await get_proxies(db)
+
+
+async def delete_proxies(db,ids:list[int])->int:
+    marks=','.join('?' for _ in ids)
+    async with db.execute(f'DELETE FROM proxies WHERE id IN ({marks})',ids) as cur:deleted=cur.rowcount
+    await db.commit();return deleted
+
+
+async def test_proxy(db,pid:int)->dict:
+    async with db.execute('SELECT url,protocol FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
+    if not row:raise ValueError('代理不存在')
+    started=time.perf_counter()
+    try:
+        scheme=row['protocol'].lower()
+        if scheme in ('socks4','socks5','socks5h'):
+            from httpx_socks import AsyncProxyTransport
+            transport=AsyncProxyTransport.from_url(row['url'])
+            client_context=httpx.AsyncClient(transport=transport,timeout=8.0,follow_redirects=False,trust_env=False)
+        else:
+            client_context=httpx.AsyncClient(proxy=row['url'],timeout=8.0,follow_redirects=False,trust_env=False)
+        async with client_context as client:
+            response=await client.get('https://example.com/healthz')
+        return {'ok':response.status_code<500,'status_code':response.status_code,'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol']}
+    except (httpx.HTTPError,ValueError,OSError,ImportError):
+        return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol'],'error':'代理连接失败，请检查地址或线路'}
+
+
+async def import_free_proxies(db,protocol:str,country_code:str,count:int,enabled:bool)->dict:
+    params={'protocol':protocol,'country_code':'all' if country_code.lower()=='all' else country_code.upper(),'count':count}
+    try:
+        async with httpx.AsyncClient(timeout=15.0,follow_redirects=False,trust_env=False) as client:
+            response=await client.get('https://proxy.scdn.io/api/get_proxy.php',params=params)
+            data=response.json()
+    except (httpx.HTTPError,ValueError):raise ValueError('免费代理服务暂时不可用')
+    if response.status_code>=400 or not isinstance(data,dict) or data.get('code') not in (200,0):
+        raise ValueError('免费代理服务返回异常')
+    values=((data.get('data') or {}).get('proxies') or [])
+    def as_proxy(value):
+        if isinstance(value,dict):
+            raw=value.get('proxy') or value.get('address') or value.get('url')
+            if not raw and value.get('ip') and value.get('port'):raw=f"{value['ip']}:{value['port']}"
+            detected=str(value.get('protocol') or value.get('type') or '').lower()
+        elif isinstance(value,str):
+            raw=value;detected=''
+        else:return ''
+        if not raw:return ''
+        if '://' in raw:return raw
+        scheme=detected if detected in ('http','https','socks4','socks5') else ('http' if protocol=='all' else protocol)
+        return f'{scheme}://{raw}'
+    text='\n'.join(item for value in values if (item:=as_proxy(value)))
+    return await append_proxies(db,text,enabled)

@@ -3,8 +3,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..auth import get_current_admin
 from ..database import get_db, log_action
-from ..models import ProxyUpdate, ToggleRequest
-from ..services.proxy_service import get_proxies, save_proxies
+from ..models import ProxyFreeImportRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
+from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, import_free_proxies, save_proxies, test_proxy
 
 router=APIRouter(prefix='/api/proxies',tags=['proxies'])
 
@@ -20,6 +20,44 @@ async def update_proxies(body:ProxyUpdate,request:Request,admin:dict=Depends(get
     except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
     await log_action(db,admin['id'],'proxy_update','proxies',None,f"count={result['total']}",request.client.host if request.client else '')
     return result
+
+
+@router.post('')
+async def add_proxies(body:ProxyImportRequest,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    try:result=await append_proxies(db,body.text,body.enabled)
+    except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
+    await log_action(db,admin['id'],'proxy_add','proxies',None,f"count={result['total']}",request.client.host if request.client else '')
+    return result
+
+
+@router.post('/import-free')
+async def import_free(body:ProxyFreeImportRequest,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    current=await get_proxies(db)
+    try:result=await import_free_proxies(db,body.protocol,body.country_code,body.count,current['enabled'])
+    except ValueError as e:raise HTTPException(status_code=502,detail=str(e))
+    await log_action(db,admin['id'],'proxy_import_free','proxies',None,f"protocol={body.protocol},count={body.count}",request.client.host if request.client else '')
+    return result
+
+
+@router.post('/batch-delete')
+async def batch_delete(body:ProxyIdsRequest,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    deleted=await delete_proxies(db,list(dict.fromkeys(body.ids)))
+    await log_action(db,admin['id'],'proxy_delete','proxies',None,f"count={deleted}",request.client.host if request.client else '')
+    return {'deleted':deleted,**(await get_proxies(db))}
+
+
+@router.delete('/{pid}')
+async def delete_proxy(pid:int,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    deleted=await delete_proxies(db,[pid])
+    if not deleted:raise HTTPException(status_code=404,detail='代理不存在')
+    await log_action(db,admin['id'],'proxy_delete','proxy',pid,'',request.client.host if request.client else '')
+    return {'deleted':deleted,**(await get_proxies(db))}
+
+
+@router.post('/{pid}/test')
+async def check_proxy(pid:int,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    try:return await test_proxy(db,pid)
+    except ValueError as e:raise HTTPException(status_code=404,detail=str(e))
 
 
 @router.put('/enabled')

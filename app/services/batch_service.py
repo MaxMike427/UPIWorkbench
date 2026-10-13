@@ -137,6 +137,8 @@ class BatchService:
         async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(bid,)) as cur:batch=await cur.fetchone()
         if not batch:raise ValueError('任务不存在')
         snapshot=json.loads(batch['snapshot_json'] or '{}')
+        if any(str(proxy).split('://',1)[0].lower() not in ('http','https','socks5') for proxy in snapshot.get('proxies',[])):
+            raise ValueError('任务代理包含 ytc 不支持的协议，仅支持 HTTP/HTTPS/SOCKS5')
         if snapshot.get('sms_enabled',True) and not self.sms.get('cdk'):raise ValueError('请先保存接码 CDK，或为新任务关闭接码')
         async with db.execute("SELECT 1 FROM batch_members WHERE batch_id=? AND stage IN ('pending','qualified','upi_failed','qual_failed') LIMIT 1",(bid,)) as cur:requires_payment=await cur.fetchone()
         if requires_payment and not self.upi.get('ytc_api_key'):raise ValueError('请先保存 ytc 提链支付 CDK')

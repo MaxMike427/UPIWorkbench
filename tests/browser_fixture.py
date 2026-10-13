@@ -17,6 +17,10 @@ REMOTE_ACCOUNTS=[]
 
 
 async def integration_get(self,url,**kwargs):
+    if str(url).startswith('https://proxy.scdn.io/api/get_proxy.php'):
+        return httpx.Response(200,json={'code':200,'message':'success','data':{'proxies':['10.0.0.1:8080','10.0.0.2:1080'],'count':2}},request=httpx.Request('GET',url))
+    if str(url)=='https://example.com/healthz':
+        return httpx.Response(204,request=httpx.Request('GET',url))
     if not str(url).startswith('https://sub2api.example.test/api/v1/admin/'):
         raise AssertionError('浏览器验收禁止访问真实第三方接口')
     assert kwargs['headers']['x-api-key']=='admin-browser-test'

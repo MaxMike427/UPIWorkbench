@@ -31,6 +31,8 @@ async def _ytc_proxies(db,provider):
     async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
     if await _cfg(db,'proxy.enabled')!='true' or not proxies:
         raise HTTPException(status_code=400,detail='新提链需要开启代理库并保存有效代理')
+    if any(proxy.split('://',1)[0].lower() not in ('http','https','socks5') for proxy in proxies):
+        raise HTTPException(status_code=400,detail='任务代理包含 ytc 不支持的协议，仅支持 HTTP/HTTPS/SOCKS5')
     return proxies
 
 

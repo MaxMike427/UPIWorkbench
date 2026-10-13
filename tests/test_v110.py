@@ -33,6 +33,53 @@ def test_proxy_library_accepts_bare_host_port_as_http(client):
     assert result['items']==[{'id':1,'url':'http://134.209.144.56:80','protocol':'http','host':'134.209.144.56','port':80}]
 
 
+def test_proxy_library_supports_add_test_and_batch_delete(client,monkeypatch):
+    h=_login(client)
+    assert client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False}).status_code==200
+    assert client.post('/api/proxies',headers=h,json={'text':'https://proxy.example:443','enabled':False}).status_code==200
+    async def get(self,url,**kwargs):
+        assert url=='https://example.com/healthz'
+        return httpx.Response(204,request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert result['ok'] is True and result['protocol']=='http' and isinstance(result['latency_ms'],int)
+    assert client.post('/api/proxies/batch-delete',headers=h,json={'ids':[1]}).json()['deleted']==1
+    assert [p['id'] for p in client.get('/api/proxies',headers=h).json()['items']]==[2]
+
+
+def test_free_proxy_import_normalizes_protocol_and_country_request(client,monkeypatch):
+    h=_login(client);calls=[]
+    async def get(self,url,**kwargs):
+        calls.append((url,kwargs['params']))
+        return httpx.Response(200,json={'code':200,'message':'success','data':{'proxies':['10.0.0.1:8080','10.0.0.2:1080'],'count':2}},request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    r=client.post('/api/proxies/import-free',headers=h,json={'protocol':'socks5','country_code':'CN','count':2})
+    assert r.status_code==200,r.text
+    assert calls==[('https://proxy.scdn.io/api/get_proxy.php',{'protocol':'socks5','country_code':'CN','count':2})]
+    assert [p['url'] for p in r.json()['items']]==['socks5://10.0.0.1:8080','socks5://10.0.0.2:1080']
+
+
+def test_proxy_library_can_store_socks4_but_new_ytc_task_rejects_it(client):
+    h=_login(client)
+    r=client.post('/api/proxies',headers=h,json={'text':'socks4://10.0.0.1:1080','enabled':True})
+    assert r.status_code==200
+    client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})
+    client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
+    bid=client.post('/api/batches',headers=h,json={'name':'socks4','credential_ids':[1]}).json()['id']
+    r=client.post(f'/api/batches/{bid}/start',headers=h)
+    assert r.status_code==400 and 'SOCKS5' in r.json()['detail']
+
+
+def test_legacy_upi_api_rejects_socks4_before_provider_request(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks4://10.0.0.1:1080','enabled':True})
+    client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
+    async def forbidden(*args,**kwargs):raise AssertionError('不应提交 SOCKS4 到 ytc')
+    monkeypatch.setattr(httpx.AsyncClient,'post',forbidden)
+    r=client.post('/api/upi/create',headers=h,json={'credential_ids':[1],'amount':100})
+    assert r.status_code==400 and 'SOCKS5' in r.json()['detail']
+
+
 def test_created_task_snapshots_proxy_and_sms_switch(client):
     h=_login(client)
     client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})
