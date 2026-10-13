@@ -6,6 +6,7 @@ import aiosqlite
 import httpx
 
 from tests.test_product_requirements import client, _login
+from app.services import proxy_service
 from app.services.qualification_service import CheckOutcome
 
 
@@ -48,6 +49,48 @@ def test_proxy_library_supports_add_test_and_batch_delete(client,monkeypatch):
     assert result['ok'] is True and result['protocol']=='http' and isinstance(result['latency_ms'],int)
     assert client.post('/api/proxies/batch-delete',headers=h,json={'ids':[1]}).json()['deleted']==1
     assert [p['id'] for p in client.get('/api/proxies',headers=h).json()['items']]==[2]
+
+
+def test_proxy_test_falls_back_to_http_and_reports_tested_protocol(client,monkeypatch):
+    h=_login(client)
+    assert client.post('/api/proxies',headers=h,json={'text':'https://proxy.example:443','enabled':False}).status_code==200
+    sent=[]
+    async def post(self,url,**kwargs):
+        sent.append(kwargs['data']['protocols'])
+        ok=kwargs['data']['protocols']=='HTTP'
+        return httpx.Response(200,json={'status':'success' if ok else 'error',
+            'results':{'HTTPS':{'status':'error','message':'不可用'},'HTTP':{'status':'success','message':'可用'}}},request=httpx.Request('POST',url))
+    monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert sent==['HTTPS','HTTP']
+    assert result['ok'] is True and result['protocol']=='https' and result['tested_protocol']=='http'
+
+
+def test_proxy_test_never_sends_authenticated_proxies_to_third_party(client,monkeypatch):
+    h=_login(client)
+    assert client.post('/api/proxies',headers=h,json={'text':'socks5://user:secret@proxy.example:1080','enabled':False}).status_code==200
+    async def post(self,url,**kwargs):raise AssertionError('带认证代理不得发送到第三方测试接口')
+    monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert result['ok'] is False and '认证' in result['error']
+    assert 'secret' not in json.dumps(result,ensure_ascii=False)
+
+
+def test_proxy_batch_test_spaces_requests_and_reports_rate_limit(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80\n134.209.144.57:80','enabled':False})
+    monkeypatch.setattr(httpx.AsyncClient,'post',lambda self,url,**kwargs:coro_429())
+    pauses=[]
+    async def pause():pauses.append(True)
+    monkeypatch.setattr(proxy_service,'_pause',pause)
+    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[1,2]}).json()['results']
+    assert [r['id'] for r in results]==[1,2]
+    assert all(r['ok'] is False and '频繁' in r['error'] for r in results)
+    assert len(pauses)==1
+
+
+async def coro_429():
+    return httpx.Response(429,json={},request=httpx.Request('POST','https://proxy.scdn.io/api/test_proxy.php'))
 
 
 def test_free_proxy_import_normalizes_protocol_and_country_request(client,monkeypatch):

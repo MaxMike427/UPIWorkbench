@@ -1,10 +1,24 @@
 """代理库：校验 URI，存储真实凭证但只向页面返回脱敏地址。"""
 from __future__ import annotations
 
+import asyncio
 import time
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
+
+TEST_ENDPOINT='https://proxy.scdn.io/api/test_proxy.php'
+FREE_ENDPOINT='https://proxy.scdn.io/api/get_proxy.php'
+BATCH_TEST_DELAY=0.8
+_TEST_PROTOCOLS={'http':('HTTP',),'https':('HTTPS','HTTP'),'socks4':('SOCKS4',),'socks5':('SOCKS5',),'socks5h':('SOCKS5',)}
+
+
+class _TestBusy(ValueError):
+    """第三方测试接口限流或超时，调用方应提示稍后重试。"""
+
+
+async def _pause():
+    await asyncio.sleep(BATCH_TEST_DELAY)
 
 
 def parse_proxy(value:str) -> dict:
@@ -81,24 +95,35 @@ async def delete_proxies(db,ids:list[int])->int:
 async def test_proxy(db,pid:int)->dict:
     async with db.execute('SELECT url,protocol,host,port FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
     if not row:raise ValueError('代理不存在')
-    started=time.perf_counter()
+    base={'latency_ms':0,'protocol':row['protocol']}
+    if '@' in row['url']:
+        return {**base,'ok':False,'tested_protocol':None,'error':'proxy.scdn.io 测试接口不支持带认证的代理'}
+    labels=_TEST_PROTOCOLS.get(row['protocol'],('HTTP',))
+    started=time.perf_counter();result={**base,'ok':False,'tested_protocol':labels[0].lower(),'results':{},'status':'error'}
     try:
-        async with httpx.AsyncClient(timeout=15.0,follow_redirects=False,trust_env=False) as client:
-            response=await client.post('https://proxy.scdn.io/api/test_proxy.php',data={
-                'ip':row['host'],'port':row['port'],'protocols':row['protocol'].replace('socks5h','socks5').upper()})
-            data=response.json()
-        if response.status_code>=400 or not isinstance(data,dict):
-            raise ValueError('proxy.scdn.io 测试接口返回异常')
-        ok=data.get('status')=='success'
-        return {'ok':ok,'status':data.get('status','error'),'results':data.get('results',{}),
-                'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol']}
+        async with httpx.AsyncClient(timeout=25.0,follow_redirects=False,trust_env=False) as client:
+            for index,label in enumerate(labels):
+                response=await client.post(TEST_ENDPOINT,data={'ip':row['host'],'port':row['port'],'protocols':label})
+                if response.status_code==429:raise _TestBusy('测试请求过于频繁，请稍后重试')
+                if response.status_code==504:raise _TestBusy('代理测试超时，请稍后重试')
+                if response.status_code>=400:raise ValueError(f'测试接口返回异常（HTTP {response.status_code}）')
+                data=response.json()
+                if not isinstance(data,dict):raise ValueError('测试接口返回异常')
+                ok=data.get('status')=='success'
+                result={**result,'ok':ok,'status':data.get('status','error'),'results':data.get('results') or {},
+                        'tested_protocol':label.lower(),'message':data.get('message') or ''}
+                if ok or index==len(labels)-1:break
+    except _TestBusy as e:
+        result={**result,'error':str(e)}
     except (httpx.HTTPError,ValueError,OSError,ImportError):
-        return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol'],'error':'代理连接失败，请检查地址或线路'}
+        result={**result,'error':'测试接口调用失败，请稍后重试'}
+    return {**result,'latency_ms':round((time.perf_counter()-started)*1000)}
 
 
 async def test_proxies(db,ids:list[int])->list[dict]:
     results=[]
-    for pid in ids:
+    for index,pid in enumerate(ids):
+        if index:await _pause()
         try:
             result=await test_proxy(db,pid)
             result['id']=pid
@@ -112,7 +137,7 @@ async def import_free_proxies(db,protocol:str,country_code:str,count:int,enabled
     params={'protocol':protocol,'country_code':'all' if country_code.lower()=='all' else country_code.upper(),'count':count}
     try:
         async with httpx.AsyncClient(timeout=15.0,follow_redirects=False,trust_env=False) as client:
-            response=await client.get('https://proxy.scdn.io/api/get_proxy.php',params=params)
+            response=await client.get(FREE_ENDPOINT,params=params)
             data=response.json()
     except (httpx.HTTPError,ValueError):raise ValueError('免费代理服务暂时不可用')
     if response.status_code>=400 or not isinstance(data,dict) or data.get('code') not in (200,0):
