@@ -36,7 +36,7 @@ python run.py
 - ytc 使用 `ohk_...` CDK，最多 5 次尝试；支付结果未确认时继续查询原订单，不重复提交。
 - 新提链任务必须使用已启用且非空的代理库，并通过 `proxy_source=provided`/`proxies` 传给 ytc。
 - 接码默认开启，支付成功后无限间隔重试；关闭接码时写入 `paid_without_sms`，不调用 handy。
-- 接码成功后保存 CPA/sub2api JSON；只有真实接码产物和 Refresh Token 都满足要求时才允许推送 sub2api。
+- 接码成功后保存 CPA/sub2api JSON；启用集成时按任务快照自动推送，也支持成功库单选/多选后手动推送；真实接码产物和 Refresh Token 必须满足要求。
 - sub2api 使用后端 `x-api-key`，Admin Key 不返回前端；推送队列支持幂等、429 等待和结果不确定时只读核对。
 
 ## 配置与安全

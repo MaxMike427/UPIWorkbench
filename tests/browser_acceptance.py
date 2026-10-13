@@ -67,7 +67,7 @@ try:
         assert page.get_by_label('并发数',exact=True).input_value()=='2'
         page.get_by_label('实例 URL',exact=True).fill('https://sub2api.example.test/api/v1/')
         page.get_by_label('管理员 Admin Key',exact=True).fill('admin-browser-test')
-        page.get_by_label('启用成功账号推送',exact=True).check()
+        page.get_by_label('启用成功账号自动推送与手动推送',exact=True).check()
         page.get_by_role('button',name='保存集成设置',exact=True).click()
         page.get_by_text('集成设置已保存',exact=True).wait_for()
         assert page.get_by_label('管理员 Admin Key',exact=True).input_value()==''
@@ -121,6 +121,10 @@ try:
         download.value.save_as(ARTIFACTS/'task.md')
         assert '全流程成功' in (ARTIFACTS/'task.md').read_text()
         detail.get_by_role('button',name='关闭',exact=True).click()
+        page.get_by_role('button',name='成功库',exact=True).click()
+        page.get_by_label('选择本页全部成功账号').check()
+        page.get_by_role('button',name='推送 sub2api',exact=True).click()
+        page.get_by_text('已加入 2 个推送记录',exact=False).wait_for()
         page.get_by_role('button',name='集成',exact=True).click()
         page.wait_for_function("Alpine.$data(document.body).integrationPushes.length===2 && Alpine.$data(document.body).integrationPushes.every(p=>p.status==='succeeded')",timeout=20000)
         assert page.locator("section[x-show=\"tab==='integration'\"]").get_by_text('已推送',exact=True).count()==2

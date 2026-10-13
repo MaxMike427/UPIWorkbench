@@ -199,7 +199,14 @@ test('cancel of created but unstarted draft prompts then removes only that draft
 
 test('manual push reports rejected selected accounts instead of unconditional success', async () => {
   const app=createApp();app.selectedSuccess=[1,2];
-  app.api=async()=>({count:1,failed:1,results:[{credential_id:1,status:'queued'},{credential_id:2,status:'rejected',error:'未接码账号不能自动推送'}]});
+  app.api=async()=>({count:1,failed:1,results:[{credential_id:1,status:'queued'},{credential_id:2,status:'rejected',error:'未接码账号不能推送'}]});
   await app.enqueueSelectedPushes();
-  assert.ok(app.toasts.some(t=>t.msg.includes('未接码账号不能自动推送') && !t.ok));
+  assert.ok(app.toasts.some(t=>t.msg.includes('未接码账号不能推送') && !t.ok));
+});
+
+test('success library exposes one manual sub2api push action for selected accounts', () => {
+  const section=html.match(/<section x-show="tab==='successes'"[\s\S]*?<\/section>/)[0];
+  assert.match(section,/推送 sub2api/);
+  assert.match(section,/enqueueSelectedPushes\(\)/);
+  assert.doesNotMatch(section,/推送选中已接码账号/);
 });

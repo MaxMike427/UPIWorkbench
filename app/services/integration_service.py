@@ -110,7 +110,7 @@ async def account_payload(db,cid:int)->dict:
         try:candidates.append(extract_oauth(json.loads(p.read_text(encoding='utf-8-sig'))))
         except ValueError:continue
     if len(candidates)!=1:raise ValueError('未找到唯一可推送账号凭据')
-    if not candidates[0].get('refresh_token'):raise ValueError('缺少 Refresh Token，当前只自动推送接码后的完整 OAuth 账号')
+    if not candidates[0].get('refresh_token'):raise ValueError('缺少 Refresh Token，当前账号不能推送，需要接码后的完整 OAuth 账号')
     return candidates[0]
 
 
@@ -130,7 +130,7 @@ async def find_remote_account(url:str,key:str,payload:dict)->int|None:
                      credentials.get('chatgpt_account_id')==payload['account_id'] and credentials.get('chatgpt_user_id')==payload['chatgpt_user_id'])):
                     return row['id']
             if len(rows)<100 or not isinstance(data,dict) or page*100>=data.get('total',len(rows)):return None
-    raise ValueError('远端账号过多，未完成重复核对，不自动推送')
+    raise ValueError('远端账号过多，未完成重复核对，停止推送')
 
 
 async def enqueue_push(db,cid:int,bid:int|None,snapshot:dict)->int|None:
@@ -138,7 +138,7 @@ async def enqueue_push(db,cid:int,bid:int|None,snapshot:dict)->int|None:
     async with db.execute(f'SELECT c.id FROM credentials c WHERE c.id=? AND {SUCCESS_FILTER}',(cid,)) as cur:
         if not await cur.fetchone():raise ValueError('只有本地全流程成功账号可推送')
     async with db.execute("SELECT 1 FROM batch_members WHERE credential_id=? AND stage='done' AND sms_task_id IS NOT NULL LIMIT 1",(cid,)) as cur:
-        if not await cur.fetchone():raise ValueError('未接码账号不能自动推送')
+        if not await cur.fetchone():raise ValueError('未接码账号不能推送')
     url=normalize_url(snapshot.get('integration_url',''))
     template=IntegrationTemplate(**snapshot.get('integration_template',{})).model_dump()
     async with db.execute("SELECT id,status FROM integration_pushes WHERE instance_url=? AND credential_id=?"

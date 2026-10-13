@@ -246,13 +246,50 @@ def test_manual_push_returns_each_selected_account_result_without_hiding_partial
     h=_login(client)
     client.post('/api/configs/batch',headers=h,json={'items':{'sub2api.enabled':'true','sub2api.base_url':'https://sub2.example','sub2api.admin_key':'admin-test'}})
     async def enqueue(db,cid,bid,snapshot):
-        if cid==2:raise ValueError('未接码账号不能自动推送')
+        if cid==2:raise ValueError('未接码账号不能推送')
         return 11
     monkeypatch.setattr('app.services.integration_service.enqueue_push',enqueue)
     r=client.post('/api/integrations/sub2api/pushes',headers=h,json={'ids':[1,2]})
     assert r.status_code==200,r.text
     assert r.json()['count']==1 and r.json()['failed']==1
-    assert r.json()['results']==[{'credential_id':1,'push_id':11,'status':'queued'},{'credential_id':2,'status':'rejected','error':'未接码账号不能自动推送'}]
+    assert r.json()['results']==[{'credential_id':1,'push_id':11,'status':'queued'},{'credential_id':2,'status':'rejected','error':'未接码账号不能推送'}]
+
+
+def test_completed_sms_task_auto_enqueues_sub2api_and_manual_push_remains_available(client,monkeypatch):
+    from app.services import batch_service as bs
+    h=_login(client)
+    client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})
+    client.put('/api/configs/sms_provider.cdk',headers=h,json={'value':'sms-test'})
+    client.put('/api/configs/sub2api.base_url',headers=h,json={'value':'https://sub2.example'})
+    client.put('/api/configs/sub2api.admin_key',headers=h,json={'value':'admin-test'})
+    client.put('/api/configs/sub2api.enabled',headers=h,json={'value':'true'})
+    client.put('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':True})
+    class Qual:
+        def __init__(self,*args,**kwargs):pass
+        async def check_single(self,at):return CheckOutcome(True,'eligible',{})
+    class UPI:
+        def __init__(self,db,**kwargs):self.db=db
+        async def create_with_retries(self,cid,*args,**kwargs):
+            await self.db.execute("INSERT INTO upi_tasks(credential_id,amount,status,upi_link) VALUES(?,1,'success','https://pay.example')",(cid,));await self.db.commit()
+            return {'id':1,'status':'success'}
+    class SMS:
+        def __init__(self,db,**kwargs):self.db=db
+        async def bind_with_retries(self,cid):
+            await self.db.execute("INSERT INTO sms_tasks(credential_id,status,new_access_token) VALUES(1,'bound','eyJnew')")
+            await self.db.commit()
+            return {'id':1,'status':'bound'}
+    enqueued=[]
+    async def enqueue(*args,**kwargs):enqueued.append(args)
+    monkeypatch.setattr(bs,'QualificationService',Qual);monkeypatch.setattr(bs,'UPIService',UPI);monkeypatch.setattr(bs,'SMSService',SMS)
+    monkeypatch.setattr('app.services.integration_service.enqueue_push',enqueue)
+    async def run():
+        svc=bs.BatchService(client._product_db_path)
+        bid=await svc.create_batch('手动推送',[1],100)
+        async with aiosqlite.connect(client._product_db_path) as db:
+            await db.execute("UPDATE task_batches SET status='running' WHERE id=?",(bid,));await db.commit()
+        await svc.run(bid)
+    asyncio.run(run())
+    assert len(enqueued)==1
 
 
 def test_legacy_retry_keeps_sms_on_and_integration_off_despite_new_global_settings(client):
