@@ -7,7 +7,7 @@ import zipfile
 import httpx
 import uvicorn
 
-from app.services import batch_service
+from app.services import batch_service, proxy_service
 from app.services.qualification_service import CheckOutcome
 from app.services.sms_service import SMSService
 from app.services.upi_service import UPIService
@@ -32,10 +32,10 @@ async def integration_get(self,url,**kwargs):
     return httpx.Response(200,json={'code':0,'data':data},request=httpx.Request('GET',url))
 
 
-async def proxy_test_post(self,url,**kwargs):
-    if url=='https://proxy.scdn.io/api/test_proxy.php':
-        return httpx.Response(200,json={'status':'success','results':{'HTTP':{'status':'success','message':'2ms'}}},request=httpx.Request('POST',url))
-    return await integration_post(self,url,**kwargs)
+async def probe_get_result(url):
+    assert proxy_service.PROBE_TARGET=='https://api.ipify.org?format=json'
+    assert proxy_service.PROBE_TIMEOUT==6.0
+    return {'ok':True,'latency_ms':820,'exit_ip':'203.0.113.7'}
 
 
 async def integration_post(self,url,**kwargs):
@@ -50,7 +50,8 @@ async def integration_post(self,url,**kwargs):
 
 
 httpx.AsyncClient.get=integration_get
-httpx.AsyncClient.post=proxy_test_post
+httpx.AsyncClient.post=integration_post
+proxy_service._probe=probe_get_result
 
 
 class Qual:

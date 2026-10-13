@@ -219,7 +219,9 @@ test('proxy library exposes add import free-import batch-delete and row test con
   for (const label of ['添加代理','导入代理','免费代理导入','批量测试','批量删除','测试连接']) assert.match(section,new RegExp(label));
   assert.match(section,/proxy\.scdn\.io\/api_docs\.php/);
   assert.match(section,/选择全部代理/);
+  assert.match(section,/本机经代理实测/);
+  assert.doesNotMatch(section,/test_proxy\.php/);
   assert.match(html,/proxyTestText\(result\)/);
   assert.match(html,/tested_protocol/);
-  assert.match(html,/按 '\+result\.tested_protocol\.toUpperCase\(\)\+' 测试/);
+  assert.match(html,/出口 '\+result\.exit_ip/);
 });

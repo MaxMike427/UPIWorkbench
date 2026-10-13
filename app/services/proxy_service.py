@@ -2,23 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import ssl
 import time
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
-TEST_ENDPOINT='https://proxy.scdn.io/api/test_proxy.php'
 FREE_ENDPOINT='https://proxy.scdn.io/api/get_proxy.php'
-BATCH_TEST_DELAY=0.8
-_TEST_PROTOCOLS={'http':('HTTP',),'https':('HTTPS','HTTP'),'socks4':('SOCKS4',),'socks5':('SOCKS5',),'socks5h':('SOCKS5',)}
-
-
-class _TestBusy(ValueError):
-    """第三方测试接口限流或超时，调用方应提示稍后重试。"""
-
-
-async def _pause():
-    await asyncio.sleep(BATCH_TEST_DELAY)
+PROBE_TARGET='https://api.ipify.org?format=json'
+PROBE_TIMEOUT=6.0
+PROBE_CONCURRENCY=8
 
 
 def parse_proxy(value:str) -> dict:
@@ -92,45 +86,66 @@ async def delete_proxies(db,ids:list[int])->int:
     await db.commit();return deleted
 
 
-async def test_proxy(db,pid:int)->dict:
-    async with db.execute('SELECT url,protocol,host,port FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
-    if not row:raise ValueError('代理不存在')
-    base={'latency_ms':0,'protocol':row['protocol']}
-    if '@' in row['url']:
-        return {**base,'ok':False,'tested_protocol':None,'error':'proxy.scdn.io 测试接口不支持带认证的代理'}
-    labels=_TEST_PROTOCOLS.get(row['protocol'],('HTTP',))
-    started=time.perf_counter();result={**base,'ok':False,'tested_protocol':labels[0].lower(),'results':{},'status':'error'}
+def _client_for(url:str,timeout:float):
+    scheme=url.split('://',1)[0].lower()
+    if scheme in ('socks4','socks5','socks5h'):
+        from httpx_socks import AsyncProxyTransport
+        return httpx.AsyncClient(transport=AsyncProxyTransport.from_url(url),timeout=timeout,follow_redirects=False,trust_env=False)
+    return httpx.AsyncClient(proxy=url,timeout=timeout,follow_redirects=False,trust_env=False)
+
+
+def _probe_error(error:BaseException)->str:
+    cause=error
+    for _ in range(6):
+        if isinstance(cause,ssl.SSLCertVerificationError):return 'TLS 证书校验失败，疑似 TLS 中间人代理'
+        cause=cause.__cause__ or cause.__context__
+        if cause is None:break
+    names={klass.__name__ for klass in type(error).__mro__}
+    if isinstance(error,(httpx.TimeoutException,TimeoutError)) or names&{'ProxyTimeoutError','ProxyEmptyResponseError'}:return '连接超时'
+    if isinstance(error,httpx.ProxyError) or names&{'ProxyAuthenticationError','ProxyProtocolError','SOCKS5AuthError'}:return '代理握手失败，请检查协议或认证信息'
+    if isinstance(error,httpx.ConnectError) or names&{'ProxyConnectionError'}:return '无法连接到代理'
+    if isinstance(error,httpx.RemoteProtocolError) or names&{'ProxyError'}:return '代理转发异常'
+    if isinstance(error,ssl.SSLError):return 'TLS 握手失败'
+    if isinstance(error,OSError):return '网络错误，请检查地址或线路'
+    return '测试失败，请稍后重试'
+
+
+async def _probe(url:str,timeout:float=PROBE_TIMEOUT)->dict:
+    started=time.perf_counter()
     try:
-        async with httpx.AsyncClient(timeout=25.0,follow_redirects=False,trust_env=False) as client:
-            for index,label in enumerate(labels):
-                response=await client.post(TEST_ENDPOINT,data={'ip':row['host'],'port':row['port'],'protocols':label})
-                if response.status_code==429:raise _TestBusy('测试请求过于频繁，请稍后重试')
-                if response.status_code==504:raise _TestBusy('代理测试超时，请稍后重试')
-                if response.status_code>=400:raise ValueError(f'测试接口返回异常（HTTP {response.status_code}）')
-                data=response.json()
-                if not isinstance(data,dict):raise ValueError('测试接口返回异常')
-                ok=data.get('status')=='success'
-                result={**result,'ok':ok,'status':data.get('status','error'),'results':data.get('results') or {},
-                        'tested_protocol':label.lower(),'message':data.get('message') or ''}
-                if ok or index==len(labels)-1:break
-    except _TestBusy as e:
-        result={**result,'error':str(e)}
-    except (httpx.HTTPError,ValueError,OSError,ImportError):
-        result={**result,'error':'测试接口调用失败，请稍后重试'}
-    return {**result,'latency_ms':round((time.perf_counter()-started)*1000)}
+        async with _client_for(url,timeout) as client:
+            response=await client.get(PROBE_TARGET)
+        latency=round((time.perf_counter()-started)*1000)
+        if response.status_code>=500:return {'ok':False,'error':'探测目标暂时不可用'}
+        exit_ip=None
+        try:exit_ip=response.json().get('ip')
+        except ValueError:exit_ip=response.text.strip()[:64] or None
+        return {'ok':True,'latency_ms':latency,'exit_ip':exit_ip}
+    except (httpx.HTTPError,ssl.SSLError,OSError,ValueError) as e:
+        return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'error':_probe_error(e)}
 
 
-async def test_proxies(db,ids:list[int])->list[dict]:
-    results=[]
-    for index,pid in enumerate(ids):
-        if index:await _pause()
-        try:
-            result=await test_proxy(db,pid)
-            result['id']=pid
-        except ValueError as e:
-            result={'id':pid,'ok':False,'error':str(e)}
-        results.append(result)
-    return results
+async def test_proxy(db,pid:int)->dict:
+    async with db.execute('SELECT url,protocol FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
+    if not row:raise ValueError('代理不存在')
+    schemes=[row['protocol']]+(['http'] if row['protocol']=='https' else [])
+    result={'ok':False,'protocol':row['protocol'],'tested_protocol':row['protocol'],'latency_ms':0}
+    for index,scheme in enumerate(schemes):
+        candidate=row['url'] if index==0 else re.sub(r'^https://',f'http://',row['url'])
+        outcome=await _probe(candidate)
+        result={**result,**outcome,'tested_protocol':scheme}
+        if outcome['ok'] or index==len(schemes)-1:break
+    return result
+
+
+async def test_proxies(db,ids:list[int],concurrency:int=PROBE_CONCURRENCY)->list[dict]:
+    unique=list(dict.fromkeys(ids))
+    semaphore=asyncio.Semaphore(max(1,concurrency))
+    async def run(pid):
+        async with semaphore:
+            try:return {'id':pid,**await test_proxy(db,pid)}
+            except ValueError as e:return {'id':pid,'ok':False,'error':str(e)}
+    return list(await asyncio.gather(*(run(pid) for pid in unique)))
 
 
 async def import_free_proxies(db,protocol:str,country_code:str,count:int,enabled:bool)->dict:

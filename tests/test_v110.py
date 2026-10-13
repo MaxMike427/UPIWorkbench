@@ -1,9 +1,11 @@
 """V1.1.0 新功能与隐私边界，不调用真实外部服务。"""
 import asyncio
 import json
+import ssl
 
 import aiosqlite
 import httpx
+import pytest
 
 from tests.test_product_requirements import client, _login
 from app.services import proxy_service
@@ -38,59 +40,110 @@ def test_proxy_library_supports_add_test_and_batch_delete(client,monkeypatch):
     h=_login(client)
     assert client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False}).status_code==200
     assert client.post('/api/proxies',headers=h,json={'text':'https://proxy.example:443','enabled':False}).status_code==200
-    async def get(self,url,**kwargs):
-        raise AssertionError('批量测试应使用 proxy.scdn.io 专用接口')
     async def post(self,url,**kwargs):
-        assert url=='https://proxy.scdn.io/api/test_proxy.php'
-        assert kwargs['data']=={'ip':'134.209.144.56','port':80,'protocols':'HTTP'}
-        return httpx.Response(200,json={'status':'success','results':{'HTTP':{'status':'success','message':'2ms'}}},request=httpx.Request('POST',url))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get);monkeypatch.setattr(httpx.AsyncClient,'post',post)
+        raise AssertionError('代理测试不应调用任何第三方测试接口')
+    monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    monkeypatch.setattr(httpx.AsyncClient,'get',fake_probe({'ip':'203.0.113.9'}))
     result=client.post('/api/proxies/1/test',headers=h).json()
     assert result['ok'] is True and result['protocol']=='http' and isinstance(result['latency_ms'],int)
+    assert result['exit_ip']=='203.0.113.9'
     assert client.post('/api/proxies/batch-delete',headers=h,json={'ids':[1]}).json()['deleted']==1
     assert [p['id'] for p in client.get('/api/proxies',headers=h).json()['items']]==[2]
 
 
-def test_proxy_test_falls_back_to_http_and_reports_tested_protocol(client,monkeypatch):
+def test_proxy_test_probes_locally_and_never_leaks_credentials(client,monkeypatch):
+    h=_login(client)
+    assert client.post('/api/proxies',headers=h,json={'text':'socks5://user:secret@proxy.example:1080','enabled':False}).status_code==200
+    used=[]
+    async def get(self,url,**kwargs):
+        return httpx.Response(200,json={'ip':'203.0.113.10'},request=httpx.Request('GET',url))
+    async def post(self,url,**kwargs):
+        raise AssertionError('代理测试不得把代理地址或凭证发送给第三方测试接口')
+    monkeypatch.setattr(httpx.AsyncClient,'get',get);monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    monkeypatch.setattr(proxy_service,'_client_for',scheme_recorder(used))
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert result['ok'] is True and result['exit_ip']=='203.0.113.10'
+    assert used==['socks5']
+    assert 'secret' not in json.dumps(result,ensure_ascii=False)
+    assert client.get('/api/proxies',headers=h).json()['items'][0]['url']=='socks5://****:****@proxy.example:1080'
+
+
+def test_proxy_test_falls_back_to_http_for_tls_proxy_scheme(client,monkeypatch):
     h=_login(client)
     assert client.post('/api/proxies',headers=h,json={'text':'https://proxy.example:443','enabled':False}).status_code==200
-    sent=[]
-    async def post(self,url,**kwargs):
-        sent.append(kwargs['data']['protocols'])
-        ok=kwargs['data']['protocols']=='HTTP'
-        return httpx.Response(200,json={'status':'success' if ok else 'error',
-            'results':{'HTTPS':{'status':'error','message':'不可用'},'HTTP':{'status':'success','message':'可用'}}},request=httpx.Request('POST',url))
-    monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    used=[]
+    async def get(self,url,**kwargs):
+        if current_scheme()=='https':raise httpx.ConnectError('tls handshake failed')
+        return httpx.Response(200,json={'ip':'203.0.113.11'},request=httpx.Request('GET',url))
+    def current_scheme():return used[-1] if used else ''
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    monkeypatch.setattr(proxy_service,'_client_for',scheme_recorder(used))
     result=client.post('/api/proxies/1/test',headers=h).json()
-    assert sent==['HTTPS','HTTP']
+    assert used==['https','http']
     assert result['ok'] is True and result['protocol']=='https' and result['tested_protocol']=='http'
 
 
-def test_proxy_test_never_sends_authenticated_proxies_to_third_party(client,monkeypatch):
+def test_proxy_test_reports_tls_interception_as_failure(client,monkeypatch):
     h=_login(client)
-    assert client.post('/api/proxies',headers=h,json={'text':'socks5://user:secret@proxy.example:1080','enabled':False}).status_code==200
-    async def post(self,url,**kwargs):raise AssertionError('带认证代理不得发送到第三方测试接口')
-    monkeypatch.setattr(httpx.AsyncClient,'post',post)
+    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False})
+    async def get(self,url,**kwargs):
+        error=ssl.SSLCertVerificationError('certificate verify failed')
+        raise httpx.ConnectError('tls failed') from error
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
     result=client.post('/api/proxies/1/test',headers=h).json()
-    assert result['ok'] is False and '认证' in result['error']
-    assert 'secret' not in json.dumps(result,ensure_ascii=False)
+    assert result['ok'] is False and 'TLS' in result['error']
 
 
-def test_proxy_batch_test_spaces_requests_and_reports_rate_limit(client,monkeypatch):
+def test_proxy_batch_test_runs_concurrently_and_preserves_order(client,monkeypatch):
     h=_login(client)
-    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80\n134.209.144.57:80','enabled':False})
-    monkeypatch.setattr(httpx.AsyncClient,'post',lambda self,url,**kwargs:coro_429())
-    pauses=[]
-    async def pause():pauses.append(True)
-    monkeypatch.setattr(proxy_service,'_pause',pause)
-    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[1,2]}).json()['results']
-    assert [r['id'] for r in results]==[1,2]
-    assert all(r['ok'] is False and '频繁' in r['error'] for r in results)
-    assert len(pauses)==1
+    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80\n134.209.144.57:80\n134.209.144.58:80','enabled':False})
+    live={'now':0,'peak':0}
+    async def get(self,url,**kwargs):
+        live['now']+=1;live['peak']=max(live['peak'],live['now'])
+        try:
+            await asyncio.sleep(0.05)
+            return httpx.Response(200,json={'ip':'203.0.113.12'},request=httpx.Request('GET',url))
+        finally:
+            live['now']-=1
+    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[3,1,2]}).json()['results']
+    assert [r['id'] for r in results]==[3,1,2]
+    assert live['peak']>1 and all(r['ok'] for r in results)
 
 
-async def coro_429():
-    return httpx.Response(429,json={},request=httpx.Request('POST','https://proxy.scdn.io/api/test_proxy.php'))
+def test_proxy_test_maps_socks_library_errors(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks5://45.74.31.47:10501','enabled':False})
+    pytest.importorskip('python_socks')
+    from python_socks._errors import ProxyConnectionError, ProxyTimeoutError
+    async def timed_out(self,url,**kwargs):raise ProxyTimeoutError('Proxy connection timed out: 6.0')
+    monkeypatch.setattr(httpx.AsyncClient,'get',timed_out)
+    assert client.post('/api/proxies/1/test',headers=h).json()['error']=='连接超时'
+    async def refused(self,url,**kwargs):raise ProxyConnectionError(None,"Couldn't connect to proxy")
+    monkeypatch.setattr(httpx.AsyncClient,'get',refused)
+    result=client.post('/api/proxies/1/test',headers=h).json()
+    assert result['ok'] is False and result['error']=='无法连接到代理'
+
+
+def test_proxy_batch_test_reports_missing_ids(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False})
+    monkeypatch.setattr(httpx.AsyncClient,'get',fake_probe({'ip':'203.0.113.13'}))
+    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[1,999]}).json()['results']
+    assert results[-1]=={'id':999,'ok':False,'error':'代理不存在'}
+
+
+def fake_probe(payload):
+    async def get(self,url,**kwargs):
+        return httpx.Response(200,json=payload,request=httpx.Request('GET',url))
+    return get
+
+
+def scheme_recorder(used):
+    original=proxy_service._client_for
+    def wrapper(url,timeout):
+        used.append(url.split('://',1)[0]);return original(url,timeout)
+    return wrapper
 
 
 def test_free_proxy_import_normalizes_protocol_and_country_request(client,monkeypatch):
