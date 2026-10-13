@@ -7,6 +7,8 @@ from urllib.parse import urlsplit, urlunsplit
 def parse_proxy(value:str) -> dict:
     raw=value.strip()
     if raw.startswith('sk5://'):raw='socks5://'+raw[6:]
+    if '://' not in raw:
+        raw='http://'+raw
     if any(ord(char)<33 for char in raw):raise ValueError('代理地址包含无效字符')
     try:
         url=urlsplit(raw)

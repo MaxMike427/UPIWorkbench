@@ -25,6 +25,14 @@ def test_proxy_library_validates_redacts_and_preserves_when_disabled(client):
     assert result['enabled'] is False and result['total']==2
 
 
+def test_proxy_library_accepts_bare_host_port_as_http(client):
+    h=_login(client)
+    r=client.put('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':True})
+    assert r.status_code==200,r.text
+    result=client.get('/api/proxies',headers=h).json()
+    assert result['items']==[{'id':1,'url':'http://134.209.144.56:80','protocol':'http','host':'134.209.144.56','port':80}]
+
+
 def test_created_task_snapshots_proxy_and_sms_switch(client):
     h=_login(client)
     client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})

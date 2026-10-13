@@ -71,7 +71,7 @@
           <form class="card p-5" @submit.prevent="saveProxies()">
             <h2 class="font-bold">代理库</h2><p class="muted text-xs mt-1 mb-4">ytc 新提链使用这里的外部代理。关闭或没有有效代理时禁止新建提链订单；原订单仍可查询。</p>
             <label class="flex gap-2 items-center mb-4"><input type="checkbox" x-model="proxyEnabled" />启用代理库</label>
-            <label for="proxy-text" class="text-sm">一行一个代理（HTTP / HTTPS / SOCKS5 / SOCKS5H）</label>
+            <label for="proxy-text" class="text-sm">一行一个代理（HTTP / HTTPS / SOCKS5 / SOCKS5H；无协议 host:port 默认按 HTTP）</label>
             <textarea id="proxy-text" class="inp font-mono mt-2" rows="6" x-model="proxyText" placeholder="http://proxy.example.com:8080&#10;socks5://user:password@proxy.example.com:1080"></textarea>
             <p class="muted text-xs mt-2">填写新列表会替换旧列表。留空保存仅调整开关，不删除已保存代理。列表中的认证信息不回显。</p>
             <button class="btn btn-brand mt-4" :disabled="busy">保存代理库</button>
