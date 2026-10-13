@@ -79,22 +79,33 @@ async def delete_proxies(db,ids:list[int])->int:
 
 
 async def test_proxy(db,pid:int)->dict:
-    async with db.execute('SELECT url,protocol FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
+    async with db.execute('SELECT url,protocol,host,port FROM proxies WHERE id=?',(pid,)) as cur:row=await cur.fetchone()
     if not row:raise ValueError('代理不存在')
     started=time.perf_counter()
     try:
-        scheme=row['protocol'].lower()
-        if scheme in ('socks4','socks5','socks5h'):
-            from httpx_socks import AsyncProxyTransport
-            transport=AsyncProxyTransport.from_url(row['url'])
-            client_context=httpx.AsyncClient(transport=transport,timeout=8.0,follow_redirects=False,trust_env=False)
-        else:
-            client_context=httpx.AsyncClient(proxy=row['url'],timeout=8.0,follow_redirects=False,trust_env=False)
-        async with client_context as client:
-            response=await client.get('https://example.com/healthz')
-        return {'ok':response.status_code<500,'status_code':response.status_code,'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol']}
+        async with httpx.AsyncClient(timeout=15.0,follow_redirects=False,trust_env=False) as client:
+            response=await client.post('https://proxy.scdn.io/api/test_proxy.php',data={
+                'ip':row['host'],'port':row['port'],'protocols':row['protocol'].replace('socks5h','socks5').upper()})
+            data=response.json()
+        if response.status_code>=400 or not isinstance(data,dict):
+            raise ValueError('proxy.scdn.io 测试接口返回异常')
+        ok=data.get('status')=='success'
+        return {'ok':ok,'status':data.get('status','error'),'results':data.get('results',{}),
+                'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol']}
     except (httpx.HTTPError,ValueError,OSError,ImportError):
         return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'protocol':row['protocol'],'error':'代理连接失败，请检查地址或线路'}
+
+
+async def test_proxies(db,ids:list[int])->list[dict]:
+    results=[]
+    for pid in ids:
+        try:
+            result=await test_proxy(db,pid)
+            result['id']=pid
+        except ValueError as e:
+            result={'id':pid,'ok':False,'error':str(e)}
+        results.append(result)
+    return results
 
 
 async def import_free_proxies(db,protocol:str,country_code:str,count:int,enabled:bool)->dict:

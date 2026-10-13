@@ -32,6 +32,12 @@ async def integration_get(self,url,**kwargs):
     return httpx.Response(200,json={'code':0,'data':data},request=httpx.Request('GET',url))
 
 
+async def proxy_test_post(self,url,**kwargs):
+    if url=='https://proxy.scdn.io/api/test_proxy.php':
+        return httpx.Response(200,json={'status':'success','results':{'HTTP':{'status':'success','message':'2ms'}}},request=httpx.Request('POST',url))
+    return await integration_post(self,url,**kwargs)
+
+
 async def integration_post(self,url,**kwargs):
     assert url=='https://sub2api.example.test/api/v1/admin/accounts/import/codex-session'
     assert kwargs['headers']['x-api-key']=='admin-browser-test'
@@ -44,7 +50,7 @@ async def integration_post(self,url,**kwargs):
 
 
 httpx.AsyncClient.get=integration_get
-httpx.AsyncClient.post=integration_post
+httpx.AsyncClient.post=proxy_test_post
 
 
 class Qual:

@@ -216,7 +216,7 @@ test('success library exposes one manual sub2api push action for selected accoun
 
 test('proxy library exposes add import free-import batch-delete and row test controls', () => {
   const section=html.match(/<section x-show="tab==='proxies'"[\s\S]*?<\/section>/)[0];
-  for (const label of ['添加代理','导入代理','免费代理导入','批量删除','测试连接']) assert.match(section,new RegExp(label));
+  for (const label of ['添加代理','导入代理','免费代理导入','批量测试','批量删除','测试连接']) assert.match(section,new RegExp(label));
   assert.match(section,/proxy\.scdn\.io\/api_docs\.php/);
   assert.match(section,/选择全部代理/);
 });

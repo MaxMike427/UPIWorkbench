@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..auth import get_current_admin
 from ..database import get_db, log_action
 from ..models import ProxyFreeImportRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
-from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, import_free_proxies, save_proxies, test_proxy
+from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, import_free_proxies, save_proxies, test_proxies, test_proxy
 
 router=APIRouter(prefix='/api/proxies',tags=['proxies'])
 
@@ -44,6 +44,11 @@ async def batch_delete(body:ProxyIdsRequest,request:Request,admin:dict=Depends(g
     deleted=await delete_proxies(db,list(dict.fromkeys(body.ids)))
     await log_action(db,admin['id'],'proxy_delete','proxies',None,f"count={deleted}",request.client.host if request.client else '')
     return {'deleted':deleted,**(await get_proxies(db))}
+
+
+@router.post('/batch-test')
+async def batch_test(body:ProxyIdsRequest,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    return {'results':await test_proxies(db,list(dict.fromkeys(body.ids)))}
 
 
 @router.delete('/{pid}')

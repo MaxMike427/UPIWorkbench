@@ -38,9 +38,12 @@ def test_proxy_library_supports_add_test_and_batch_delete(client,monkeypatch):
     assert client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False}).status_code==200
     assert client.post('/api/proxies',headers=h,json={'text':'https://proxy.example:443','enabled':False}).status_code==200
     async def get(self,url,**kwargs):
-        assert url=='https://example.com/healthz'
-        return httpx.Response(204,request=httpx.Request('GET',url))
-    monkeypatch.setattr(httpx.AsyncClient,'get',get)
+        raise AssertionError('批量测试应使用 proxy.scdn.io 专用接口')
+    async def post(self,url,**kwargs):
+        assert url=='https://proxy.scdn.io/api/test_proxy.php'
+        assert kwargs['data']=={'ip':'134.209.144.56','port':80,'protocols':'HTTP'}
+        return httpx.Response(200,json={'status':'success','results':{'HTTP':{'status':'success','message':'2ms'}}},request=httpx.Request('POST',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',get);monkeypatch.setattr(httpx.AsyncClient,'post',post)
     result=client.post('/api/proxies/1/test',headers=h).json()
     assert result['ok'] is True and result['protocol']=='http' and isinstance(result['latency_ms'],int)
     assert client.post('/api/proxies/batch-delete',headers=h,json={'ids':[1]}).json()['deleted']==1
