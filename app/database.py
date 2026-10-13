@@ -208,6 +208,7 @@ async def init_db(db_path: str | None = None) -> str:
             if column not in cols:
                 await db.execute(sql)
         await db.execute('CREATE INDEX IF NOT EXISTS idx_integration_queue ON integration_pushes(status,instance_url,next_attempt_at,id)')
+        await db.execute("UPDATE configs SET value='local' WHERE key='extract_provider.provider' AND value='local_zero_link'")
         await db.execute("UPDATE credentials SET original_access_token=access_token WHERE original_access_token IS NULL")
         await db.execute("UPDATE batch_members SET at_snapshot=(SELECT original_access_token FROM credentials WHERE id=credential_id) WHERE at_snapshot IS NULL")
         await db.commit()
