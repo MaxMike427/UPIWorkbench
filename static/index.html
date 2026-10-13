@@ -111,7 +111,23 @@
                 <a class="btn btn-soft" :href="providerBuyUrl(smsProvider)" target="_blank" rel="noopener noreferrer">购买</a>
               </div>
               <div x-show="c.key==='upi_provider.cdk'" class="flex flex-wrap gap-2 items-center mb-3">
-                <label class="text-sm">提炼/支付服务商</label>
+                <label class="text-sm">提炼服务商</label>
+                <select class="inp sm:!w-80" x-model="extractProvider" @change="saveProvider('extract_provider',extractProvider)">
+                  <template x-for="p in providersFor('extract')"><option :value="p.id" x-text="p.name"></option></template>
+                </select>
+                <a class="btn btn-soft" :href="providerBuyUrl(extractProvider)" target="_blank" rel="noopener noreferrer">购买</a>
+                <span class="muted text-xs" x-text="'CDK: 提炼'"></span>
+              </div>
+              <div x-show="c.key==='payment_provider.cdk'" class="flex flex-wrap gap-2 items-center mb-3">
+                <label class="text-sm">支付服务商</label>
+                <select class="inp sm:!w-80" x-model="paymentProvider" @change="saveProvider('payment_provider',paymentProvider)">
+                  <template x-for="p in providersFor('pay')"><option :value="p.id" x-text="p.name"></option></template>
+                </select>
+                <a class="btn btn-soft" :href="providerBuyUrl(paymentProvider)" target="_blank" rel="noopener noreferrer">购买</a>
+                <span class="muted text-xs" x-text="'CDK: 支付'"></span>
+              </div>
+              <div x-show="c.key==='upi_provider.cdk'" class="flex flex-wrap gap-2 items-center mb-3">
+                <label class="text-sm">综合提炼/支付服务商（兼容）</label>
                 <select class="inp sm:!w-80" x-model="upiProvider" @change="saveProvider('upi_provider',upiProvider)">
                   <template x-for="p in providersFor('extract_pay').concat(providersFor('extract')).concat(providersFor('pay')).filter((p,i,a)=>a.findIndex(x=>x.id===p.id)===i)"><option :value="p.id" x-text="p.name+(p.combined?'（提炼支付）':'')"></option></template>
                 </select>
@@ -165,7 +181,7 @@ function app() {
     passwordForm:{current_password:'',new_password:'',confirm_password:''},toasts:[],_tid:0,_timer:null,_polling:false,_refreshPromise:null,
     proxyEnabled:false,proxyText:'',proxyItems:[],selectedProxies:[],showProxyAdd:false,proxyDynamic:false,smsEnabled:true,
     integrationEnabled:false,integrationUrl:'',integrationAdminKey:'',integrationKeySaved:false,integrationMessage:'',integrationGroups:[],integrationPushes:[],integrationPushTotal:0,integrationPage:1,
-    integrationTemplate:{group_ids:[],concurrency:3,rate_multiplier:1.0,models:[],update_existing:false},integrationModels:'',providers:[],providerCapabilities:{sms:[],extract:[],pay:[]},smsProvider:'handy',upiProvider:'ytc',credProvider:'',
+    integrationTemplate:{group_ids:[],concurrency:3,rate_multiplier:1.0,models:[],update_existing:false},integrationModels:'',providers:[],providerCapabilities:{sms:[],extract:[],pay:[]},smsProvider:'handy',upiProvider:'ytc',extractProvider:'ytc',paymentProvider:'masi',credProvider:'',
     navs:[{id:'dashboard',label:'仪表盘',icon:'◈'},{id:'credentials',label:'账号库',icon:'▤'},{id:'proxies',label:'代理库',icon:'⇄'},{id:'batches',label:'任务管理',icon:'▷'},{id:'successes',label:'成功库',icon:'✓'},{id:'integration',label:'集成',icon:'↗'},{id:'settings',label:'设置',icon:'⚙'}],
     statusText(value) { const labels={pending:'待处理',processing:'处理中',qualified:'已通过',failed:'失败',done:'已完成',created:'待执行',running:'执行中',paused:'已暂停',completed:'成功',waiting:'等待中',getting_phone:'获取手机号',getting_code:'等待验证码',bound:'已绑定',success:'成功',needs_review:'待人工处理',upi_ok:'历史流程成功',paid:'支付成功',paid_without_sms:'已成功未接码',binding:'接码中',qual_failed:'资格检查失败',bind_failed:'接码失败',upi_failed:'提链支付失败'};return labels[value]||'未知状态'; },
     pushStatusText(value) { return {pending:'待推送',pushing:'推送中',succeeded:'已推送',skipped:'已跳过',failed:'失败',needs_review:'需核对'}[value]||value; },
@@ -235,7 +251,7 @@ function app() {
     async downloadTaskReport() { if(!this.batchDetails)return;try{await this.downloadTxt('/api/batches/'+this.batchDetails.id+'/report','任务'+this.batchDetails.id+'-执行记录.md');this.toast('任务记录已下载');}catch(e){this.toast(this.errorText(e.message),false);} },
     async loadConfigs() { const items=await this.api('/api/configs/workspace');const get=key=>items.find(c=>c.key===key);const allowed=new Set(['sms_provider.cdk','upi_provider.cdk']);this.configs=items.filter(c=>allowed.has(c.key)).map(c=>({...c,value:c.masked?'':c.value}));this.concurrencyValue=get('app.concurrency')?.value||'3';
     this.smsProvider=get('sms_provider.provider')?.value||'handy';
-    this.upiProvider=get('upi_provider.provider')?.value||'ytc';this.smsEnabled=get('sms.enabled')?.value!=='false';this.integrationEnabled=get('sub2api.enabled')?.value==='true';this.integrationUrl=get('sub2api.base_url')?.value||'';this.integrationKeySaved=!!get('sub2api.admin_key')?.masked;this.integrationAdminKey=''; },
+    this.upiProvider=get('upi_provider.provider')?.value||'ytc';this.extractProvider=get('extract_provider.provider')?.value||'ytc';this.paymentProvider=get('payment_provider.provider')?.value||'masi';this.smsEnabled=get('sms.enabled')?.value!=='false';this.integrationEnabled=get('sub2api.enabled')?.value==='true';this.integrationUrl=get('sub2api.base_url')?.value||'';this.integrationKeySaved=!!get('sub2api.admin_key')?.masked;this.integrationAdminKey=''; },
     async saveSmsEnabled() { try{await this.api('/api/configs/sms.enabled',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({value:this.smsEnabled?'true':'false'})});this.toast('接码开关已保存，仅影响新任务');}catch(e){this.smsEnabled=!this.smsEnabled;this.toast(this.errorText(e.message),false);} },
      async loadProxies() { const j=await this.api('/api/proxies');this.proxyEnabled=j.enabled;this.proxyItems=j.items;this.selectedProxies=this.selectedProxies.filter(id=>j.items.some(p=>p.id===id)); },
      toggleAllProxies(e) { const page=new Set(this.proxyItems.map(p=>p.id));this.selectedProxies=e.target.checked?[...new Set([...this.selectedProxies,...page])]:this.selectedProxies.filter(id=>!page.has(id)); },
