@@ -110,6 +110,17 @@ def _probe_error(error:BaseException)->str:
     return '测试失败，请稍后重试'
 
 
+def _probe_failure(error:BaseException)->str:
+    name=type(error).__name__
+    if any(klass.__module__.startswith(('anyio','python_socks','httpx_socks')) for klass in type(error).__mro__):
+        if 'Timeout' in name:return '连接超时'
+        if 'Authentication' in name or 'Protocol' in name:return '代理握手失败，请检查协议或认证信息'
+        if 'Connection' in name:return '无法连接到代理'
+        if 'Broken' in name or 'EndOfStream' in name or 'Closed' in name:return '代理连接被中断'
+        return '代理连接异常'
+    return _probe_error(error)
+
+
 async def _probe(url:str,timeout:float=PROBE_TIMEOUT)->dict:
     started=time.perf_counter()
     try:
@@ -121,8 +132,9 @@ async def _probe(url:str,timeout:float=PROBE_TIMEOUT)->dict:
         try:exit_ip=response.json().get('ip')
         except ValueError:exit_ip=response.text.strip()[:64] or None
         return {'ok':True,'latency_ms':latency,'exit_ip':exit_ip}
-    except (httpx.HTTPError,ssl.SSLError,OSError,ValueError) as e:
-        return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'error':_probe_error(e)}
+    except Exception as e:
+        if isinstance(e,(asyncio.CancelledError,KeyboardInterrupt,SystemExit)):raise
+        return {'ok':False,'latency_ms':round((time.perf_counter()-started)*1000),'error':_probe_failure(e)}
 
 
 async def test_proxy(db,pid:int)->dict:
@@ -145,6 +157,7 @@ async def test_proxies(db,ids:list[int],concurrency:int=PROBE_CONCURRENCY)->list
         async with semaphore:
             try:return {'id':pid,**await test_proxy(db,pid)}
             except ValueError as e:return {'id':pid,'ok':False,'error':str(e)}
+            except Exception:return {'id':pid,'ok':False,'error':'测试失败，请稍后重试'}
     return list(await asyncio.gather(*(run(pid) for pid in unique)))
 
 

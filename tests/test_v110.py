@@ -125,6 +125,22 @@ def test_proxy_test_maps_socks_library_errors(client,monkeypatch):
     assert result['ok'] is False and result['error']=='无法连接到代理'
 
 
+def test_proxy_test_survives_broken_socks_stream(client,monkeypatch):
+    h=_login(client)
+    client.post('/api/proxies',headers=h,json={'text':'socks5://45.74.31.47:10501\n134.209.144.56:80','enabled':False})
+    anyio=pytest.importorskip('anyio')
+    calls=[]
+    async def dispatch(self,url,**kwargs):
+        calls.append(1)
+        if len(calls)==1:raise anyio.BrokenResourceError
+        return httpx.Response(200,json={'ip':'203.0.113.20'},request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'get',dispatch)
+    results=client.post('/api/proxies/batch-test',headers=h,json={'ids':[1,2]}).json()['results']
+    assert len(results)==2
+    assert results[0]['ok'] is False and results[0]['error']
+    assert results[1]['ok'] is True
+
+
 def test_proxy_batch_test_reports_missing_ids(client,monkeypatch):
     h=_login(client)
     client.post('/api/proxies',headers=h,json={'text':'134.209.144.56:80','enabled':False})
