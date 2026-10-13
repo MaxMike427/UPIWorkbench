@@ -39,7 +39,9 @@ def _out(prog: dict) -> dict:
             "current_step": prog.get("current_step"), "progress_json": prog.get("progress_json"),
             "amount": prog.get("amount") or 0, "note": prog.get("note") or "",
             "members": prog.get("members") or [], "source_batch_id": prog.get("source_batch_id"),
-            "report_available":bool(prog.get("report_path"))}
+            "report_available":bool(prog.get("report_path")),
+            "sms_enabled":prog.get('sms_enabled',True),'proxy_enabled':prog.get('proxy_enabled',False),
+            'integration_enabled':prog.get('integration_enabled',False)}
 
 
 @router.get("", response_model=PageOut[BatchOut])
@@ -50,7 +52,7 @@ async def list_batches(page: int = Query(default=1, ge=1),
         total = (await cur.fetchone())["c"]
     async with db.execute(
         "SELECT id, name, total_credentials, status, current_step, progress_json,"
-        " COALESCE(amount,0) AS amount, COALESCE(note,'') AS note, source_batch_id, report_path"
+        " COALESCE(amount,0) AS amount, COALESCE(note,'') AS note, source_batch_id, report_path, snapshot_json"
         " FROM task_batches WHERE deleted_at IS NULL ORDER BY id DESC LIMIT ? OFFSET ?",
         (page_size, (page - 1) * page_size),
     ) as cur:
@@ -58,6 +60,8 @@ async def list_batches(page: int = Query(default=1, ge=1),
     for r in rows:
         r["members"] = []
         r["report_available"] = bool(r.pop("report_path",None))
+        snapshot=json.loads(r.pop('snapshot_json') or '{}')
+        r.update({key:snapshot.get(key,key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled')})
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
@@ -112,19 +116,18 @@ async def export_batch_success(bid: int, request: Request,
     })
 
 
-async def _svc_or_400(db) -> BatchService:
+async def _svc_or_400(db,bid=None) -> BatchService:
     svc = await BatchService.from_db(db, get_db_path())
-    if not (svc.sms.get("cdk") or ""):
-        raise HTTPException(status_code=400, detail="sms_provider.cdk 未配置")
-    if svc.upi.get("provider") == "ytc" and not (svc.upi.get("ytc_api_key") or ""):
-        raise HTTPException(status_code=400, detail="请在设置中填写 ytc 提链支付 CDK（ohk_ 开头）")
+    if bid is not None:
+        try:await svc.validate_start(db,bid)
+        except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
     return svc
 
 
 @router.post("/{bid}/start")
 async def start_batch(bid: int, request: Request,
                       admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    svc = await _svc_or_400(db)
+    svc = await _svc_or_400(db,bid)
     prog = await svc.get_progress(bid)
     if not prog:
         raise HTTPException(status_code=404, detail="批次不存在")
@@ -162,7 +165,7 @@ async def pause_batch(bid: int, request: Request,
 @router.post("/{bid}/resume")
 async def resume_batch(bid: int, request: Request,
                        admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    svc = await _svc_or_400(db)
+    svc = await _svc_or_400(db,bid)
     try:
         await svc.resume(bid)
     except ValueError as e:
@@ -181,9 +184,11 @@ async def retry_failed(bid: int, request: Request,
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:
+        await svc.validate_start(db,retry['batch_id'])
         svc.start(retry["batch_id"])
-    except RuntimeError as e:
-        raise HTTPException(status_code=409, detail=str(e))
+    except (RuntimeError,ValueError) as e:
+        await db.execute("UPDATE task_batches SET status='created' WHERE id=?",(retry['batch_id'],));await db.commit()
+        raise HTTPException(status_code=400, detail=f'重试任务 #{retry["batch_id"]} 已创建，启动失败：{e}')
     await log_action(db, admin["id"], "retry_batch", "batch", retry["batch_id"],
                      f"source_batch={bid}",
                      request.client.host if request.client else "")

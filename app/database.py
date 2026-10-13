@@ -118,6 +118,29 @@ CREATE TABLE IF NOT EXISTS batch_members (
     PRIMARY KEY (batch_id, credential_id)
 );
 CREATE INDEX IF NOT EXISTS idx_batch_members_batch ON batch_members(batch_id);
+CREATE TABLE IF NOT EXISTS proxies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS integration_pushes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL REFERENCES credentials(id),
+    batch_id INTEGER REFERENCES task_batches(id),
+    instance_url TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    template_json TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    attempt_count INTEGER DEFAULT 0,
+    remote_account_id INTEGER,
+    error_msg TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(instance_url, credential_id, fingerprint)
+);
 """
 
 _MIGRATIONS = [
@@ -132,9 +155,17 @@ _MIGRATIONS = [
     ("batch_members", "sms_task_id", "ALTER TABLE batch_members ADD COLUMN sms_task_id INTEGER REFERENCES sms_tasks(id)"),
     ("upi_tasks", "external_job_id", "ALTER TABLE upi_tasks ADD COLUMN external_job_id TEXT"),
     ("task_batches", "deleted_at", "ALTER TABLE task_batches ADD COLUMN deleted_at TEXT"),
+    ("task_batches", "snapshot_json", "ALTER TABLE task_batches ADD COLUMN snapshot_json TEXT"),
+    ("integration_pushes", "next_attempt_at", "ALTER TABLE integration_pushes ADD COLUMN next_attempt_at REAL DEFAULT 0"),
 ]
 
 DEFAULT_CONFIGS = [
+    ("proxy.enabled", "false", "启用代理库"),
+    ("sms.enabled", "true", "启用接码"),
+    ("sub2api.enabled", "false", "启用 sub2api 推送"),
+    ("sub2api.base_url", "", "sub2api 实例 URL"),
+    ("sub2api.admin_key", "", "sub2api 管理员 Admin Key"),
+    ("sub2api.template", '{"group_ids":[],"concurrency":3,"rate_multiplier":1.0,"models":[],"update_existing":false}', "sub2api 推送模板"),
     ("app.concurrency", "3", "并发控制"),
     ("sms_provider.cdk", "", "接码平台兑换码"),
     ("upi_provider.cdk", "", "备用提链平台兑换码"),
@@ -165,6 +196,7 @@ async def init_db(db_path: str | None = None) -> str:
                 cols = [r[1] async for r in cur]
             if column not in cols:
                 await db.execute(sql)
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_integration_queue ON integration_pushes(status,instance_url,next_attempt_at,id)')
         await db.execute("UPDATE credentials SET original_access_token=access_token WHERE original_access_token IS NULL")
         await db.execute("UPDATE batch_members SET at_snapshot=(SELECT original_access_token FROM credentials WHERE id=credential_id) WHERE at_snapshot IS NULL")
         await db.commit()

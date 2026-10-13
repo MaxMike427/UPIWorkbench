@@ -225,6 +225,28 @@ async def test_waiting_payment_interruption_does_not_resubmit(workflow,monkeypat
         assert len(calls)==1
 
 
+async def test_ytc_needs_review_pauses_original_order_without_new_payment(workflow,monkeypatch):
+    import httpx
+    from app.services.upi_service import UPIService
+    db_path,_=workflow
+    calls=[]
+    async def post(self,url,**kwargs):
+        if url.endswith('/api/auth/login'):body={'ok':True}
+        else:calls.append(url);body={'id':'original-needs-review'}
+        return httpx.Response(200,json=body,request=httpx.Request('POST',url))
+    async def get(self,url,**kwargs):
+        body={'items':[]} if '/api/tasks' in url else {'status':'needs_review','settings':{'proxies':'socks5://u:secret@proxy.example:1080'}}
+        return httpx.Response(200,json=body,request=httpx.Request('GET',url))
+    monkeypatch.setattr(httpx.AsyncClient,'post',post);monkeypatch.setattr(httpx.AsyncClient,'get',get)
+    async with aiosqlite.connect(db_path) as db:
+        db.row_factory=aiosqlite.Row
+        svc=UPIService(db,ytc_api_key='ohk_test',wait_for_payment=True,retry_interval=0,ytc_poll_interval=0)
+        result=await svc.create_with_retries(1,100)
+        assert result['status']=='paused' and 'secret' not in result['error_msg']
+        result=await svc.create_with_retries(1,100)
+        assert result['status']=='paused' and len(calls)==1
+
+
 async def test_new_success_library_requires_sms_after_payment(workflow):
     from app.services.success_service import count_successes
     db_path,_=workflow

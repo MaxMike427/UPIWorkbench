@@ -16,11 +16,11 @@ function createApp() {
   return context.app();
 }
 
-test('workspace has exactly the five requested modules', () => {
+test('workspace has exactly the seven requested modules', () => {
   const app = createApp();
-  assert.deepEqual(Array.from(app.navs,n=>n.label), ['仪表盘','账号库','任务管理','成功库','设置']);
+  assert.deepEqual(Array.from(app.navs,n=>n.label), ['仪表盘','账号库','代理库','任务管理','成功库','集成','设置']);
   const sections = [...html.matchAll(/<section[^>]*x-show="tab==='([^']+)'"/g)].map(m=>m[1]);
-  assert.deepEqual(sections.sort(),['batches','credentials','dashboard','settings','successes'].sort());
+  assert.deepEqual(sections.sort(),['batches','credentials','dashboard','settings','successes','proxies','integration'].sort());
 });
 
 test('dashboard entry loads both real stats and terminal logs', async () => {
@@ -35,12 +35,12 @@ test('dashboard entry loads both real stats and terminal logs', async () => {
 test('creation wizard keeps selection on return and creates only one task if start fails', async () => {
   const app = createApp();
   app.selCred=[2,5];
-  app.beginTaskCreation();
+  app.beginTaskCreation('selected');
   app.nextTaskStep();
   assert.equal(app.taskStep,2);
   app.previousTaskStep();
   assert.equal(app.taskStep,1);
-  assert.deepEqual(Array.from(app.selCred),[2,5]);
+  assert.deepEqual(Array.from(app.taskSelection),[2,5]);
   app.nextTaskStep();
   let creates=0, starts=0;
   app.api=async(url)=> {
@@ -171,4 +171,35 @@ test('purchase and CDK action links are hardcoded at their requested locations',
   assert.ok(settings.indexOf('shop/8Q9RHH0W')<settings.indexOf('https://apihub.space/handy/'));
   assert.ok(settings.indexOf('shop/Camellia')<settings.indexOf('https://upi.xxsyun.xyz/employer/tickets/'));
   assert.ok(!accounts.includes('purchaseLink()') && !settings.includes('purchaseLink()'));
+});
+
+test('selected-account entry only shows selected rows and deselect removes candidates', async () => {
+  const app=createApp();app.selCred=[2,5];app.selectedAccounts={2:'two@example.com',5:'five@example.com'};
+  app.api=async()=>({items:[{id:1,account:'one'},{id:2,account:'two'},{id:5,account:'five'}],total:3});
+  app.beginTaskCreation('selected');
+  await app.loadWizardAccounts();
+  assert.deepEqual(Array.from(app.wizardAccounts,c=>c.id),[2,5]);
+  app.removeTaskAccount(2);
+  assert.deepEqual(Array.from(app.taskSelection),[5]);
+  assert.deepEqual(Array.from(app.wizardAccounts,c=>c.id),[5]);
+  app.cancelTaskCreation();
+  app.beginTaskCreation('all');
+  assert.deepEqual(Array.from(app.taskSelection),[]);
+  assert.deepEqual(Array.from(app.selCred),[2,5]);
+});
+
+test('cancel of created but unstarted draft prompts then removes only that draft', async () => {
+  const app=createApp();
+  app.taskStep=2;app.createdTaskId=19;app.taskSelection=[2];
+  const calls=[];app.api=async(url,opt)=>calls.push([url,opt.method]);
+  await app.cancelTaskCreation();
+  assert.deepEqual(calls,[['/api/batches/19','DELETE']]);
+  assert.equal(app.taskStep,0);assert.equal(app.createdTaskId,null);
+});
+
+test('manual push reports rejected selected accounts instead of unconditional success', async () => {
+  const app=createApp();app.selectedSuccess=[1,2];
+  app.api=async()=>({count:1,failed:1,results:[{credential_id:1,status:'queued'},{credential_id:2,status:'rejected',error:'未接码账号不能自动推送'}]});
+  await app.enqueueSelectedPushes();
+  assert.ok(app.toasts.some(t=>t.msg.includes('未接码账号不能自动推送') && !t.ok));
 });

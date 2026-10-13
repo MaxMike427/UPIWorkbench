@@ -22,6 +22,7 @@ ACCOUNT_STAGE_STATUS = {
     'pending':'pending', 'qualified':'qualified', 'paid':'processing', 'binding':'processing',
     'done':'done', 'upi_ok':'done', 'bound':'processing',
     'qual_failed':'failed', 'upi_failed':'failed', 'bind_failed':'failed',
+    'paid_without_sms':'paid_without_sms',
 }
 
 
@@ -54,11 +55,11 @@ async def reset_stuck_batches(db_path: str) -> int:
 
 def _counts(stages:list[str]) -> dict:
     c={"total":len(stages),"qualified":0,"failed_qual":0,"paid":0,"upi_ok":0,"failed_upi":0,
-       "bound":0,"success":0,"failed_bind":0,"pending":0}
+       "bound":0,"success":0,"paid_without_sms":0,"failed_bind":0,"pending":0}
     for s in stages:
-        if s in ('qualified','upi_failed','paid','binding','bind_failed','done','bound','upi_ok'):
+        if s in ('qualified','upi_failed','paid','binding','bind_failed','done','bound','upi_ok','paid_without_sms'):
             c['qualified']+=1
-        if s in ('paid','binding','bind_failed','done','upi_ok'):
+        if s in ('paid','binding','bind_failed','done','upi_ok','paid_without_sms'):
             c['paid']+=1
         if s in ('done','upi_ok'):
             c['success']+=1;c['bound']+=1;c['upi_ok']+=1
@@ -66,6 +67,7 @@ def _counts(stages:list[str]) -> dict:
         if s=='upi_failed':c['failed_upi']+=1
         if s=='bind_failed':c['failed_bind']+=1
         if s=='pending':c['pending']+=1
+        if s=='paid_without_sms':c['paid_without_sms']+=1
     return c
 
 
@@ -106,15 +108,43 @@ class BatchService:
                                   f" WHERE id IN ({','.join('?' for _ in ids)})",ids) as cur:
                 tokens={r['id']:r['at'] async for r in cur}
             if len(tokens)!=len(ids):raise ValueError('部分选中账号不存在，请刷新账号库重新选择')
-            async with db.execute("INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,amount,note,workflow_version)"
-                                  " VALUES(?,?,'created','created',?,?,?,2)",
-                                  (name.strip(),len(ids),json.dumps(_counts(['pending']*len(ids))),amount,note)) as cur:
+            snapshot=await self._snapshot(db)
+            async with db.execute("INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,amount,note,workflow_version,snapshot_json)"
+                                  " VALUES(?,?,'created','created',?,?,?,3,?)",
+                                  (name.strip(),len(ids),json.dumps(_counts(['pending']*len(ids))),amount,note,json.dumps(snapshot))) as cur:
                 bid=cur.lastrowid
             for cid in ids:
                 await db.execute("INSERT INTO batch_members(batch_id,credential_id,at_snapshot) VALUES(?,?,?)",(bid,cid,tokens[cid]))
             await db.commit()
             return bid
         finally:await db.close()
+
+    async def _snapshot(self,db):
+        async with db.execute('SELECT key,value FROM configs') as cur:config={r['key']:r['value'] async for r in cur}
+        async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
+        return {'sms_enabled':config.get('sms.enabled','true')=='true','proxy_enabled':config.get('proxy.enabled','false')=='true',
+                'proxies':proxies,'integration_enabled':config.get('sub2api.enabled','false')=='true',
+                'integration_url':config.get('sub2api.base_url',''),'integration_template':json.loads(config.get('sub2api.template') or '{}')}
+
+    @staticmethod
+    def _legacy_snapshot():
+        """V1.0 任务没有快照，重试必须沿用原流程而非读取当前全局开关。"""
+        return {'legacy':True,'sms_enabled':True,'proxy_enabled':False,'proxies':[],
+                'integration_enabled':False,'integration_url':'',
+                'integration_template':{}}
+
+    async def validate_start(self,db,bid):
+        async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(bid,)) as cur:batch=await cur.fetchone()
+        if not batch:raise ValueError('任务不存在')
+        snapshot=json.loads(batch['snapshot_json'] or '{}')
+        if snapshot.get('sms_enabled',True) and not self.sms.get('cdk'):raise ValueError('请先保存接码 CDK，或为新任务关闭接码')
+        async with db.execute("SELECT 1 FROM batch_members WHERE batch_id=? AND stage IN ('pending','qualified','upi_failed','qual_failed') LIMIT 1",(bid,)) as cur:requires_payment=await cur.fetchone()
+        if requires_payment and not self.upi.get('ytc_api_key'):raise ValueError('请先保存 ytc 提链支付 CDK')
+        async with db.execute("SELECT m.credential_id FROM batch_members m WHERE m.batch_id=? AND m.stage IN ('pending','qualified','upi_failed','qual_failed')"
+                              " AND NOT EXISTS(SELECT 1 FROM upi_tasks u WHERE u.credential_id=m.credential_id AND u.status='processing' AND u.external_job_id IS NOT NULL)",(bid,)) as cur:
+            requires_proxy=await cur.fetchone()
+        if batch['workflow_version'] >= 3 and not snapshot.get('legacy') and requires_proxy and (not snapshot.get('proxy_enabled') or not snapshot.get('proxies')):
+            raise ValueError('新提链需要开启代理库并保存有效代理，请重新创建含代理快照的任务')
 
     def start(self,batch_id:int):
         key=(self.db_path,batch_id)
@@ -157,6 +187,7 @@ class BatchService:
         try:
             if not await self._alive(db,batch_id):return
             async with db.execute('SELECT * FROM task_batches WHERE id=?',(batch_id,)) as cur:batch=await cur.fetchone()
+            snapshot=json.loads(batch['snapshot_json'] or '{}')
             # 新建任务统一采用最新版流程；历史成功记录原样保留。
             for step,stages in [('qualification',{'pending'}),('upi',{'qualified'}),('sms',{'paid','binding'})]:
                 if not await self._alive(db,batch_id):return
@@ -164,6 +195,11 @@ class BatchService:
                 await db.commit()
                 members=await self._members(db,batch_id,stages)
                 if not members:continue
+                if step=='sms' and not snapshot.get('sms_enabled',True):
+                    for member in members:
+                        await self._set_stage(db,batch_id,member['credential_id'],'paid_without_sms')
+                    await log_runtime(db,f'任务 #{batch_id}：接码关闭，支付成功账号标记为已成功未接码',batch_id=batch_id)
+                    continue
                 await log_runtime(db,f"任务 #{batch_id}：开始{'资格检查' if step=='qualification' else '提链支付' if step=='upi' else '无限重试接码'}，共 {len(members)} 个账号",batch_id=batch_id)
                 sem=asyncio.Semaphore(self.concurrency)
                 async def one(member):
@@ -184,7 +220,7 @@ class BatchService:
             if not await self._alive(db,batch_id):return
             await self._save_progress(db,batch_id)
             members=await self._members(db,batch_id)
-            final='completed' if members and all(m['stage']=='done' for m in members) else 'failed'
+            final='completed' if members and all(m['stage'] in ('done','paid_without_sms') for m in members) else 'failed'
             await self._set_status(db,batch_id,final,'done')
             await db.execute('UPDATE task_batches SET completed_at=CURRENT_TIMESTAMP WHERE id=?',(batch_id,))
             await db.commit()
@@ -219,7 +255,12 @@ class BatchService:
             await self._set_stage(db,bid,cid,'qualified' if outcome.has_qualification else 'qual_failed', '' if outcome.has_qualification else outcome.reason)
             await progress('资格通过' if outcome.has_qualification else '资格未通过，停止后续提链和接码')
         elif step=='upi':
-            svc=UPIService(db=db,**self.upi)
+            snapshot=json.loads(batch['snapshot_json'] or '{}')
+            options=dict(self.upi)
+            if snapshot.get('proxy_enabled') and snapshot.get('proxies'):
+                # 账号稳定分配一条代理，原订单恢复时不再次建单或切换代理。
+                options['ytc_proxies']=[snapshot['proxies'][(cid-1)%len(snapshot['proxies'])]]
+            svc=UPIService(db=db,**options)
             if hasattr(svc,'provider'):
                 svc.provider.should_continue=keep_running;svc.provider.on_progress=progress
             task=await svc.create_with_retries(cid,batch['amount'] or 10000,batch['note'] or '',at_token=m['at_snapshot'])
@@ -240,6 +281,12 @@ class BatchService:
             await self._set_stage(db,bid,cid,'done' if good else 'bind_failed','' if good else task.get('error_msg','接码未完成'),sms_task_id=task.get('id'))
             if good:
                 await db.execute("UPDATE credentials SET status='done',error_msg='',updated_at=? WHERE id=?",(utcnow_iso(),cid));await db.commit()
+                snapshot=json.loads(batch['snapshot_json'] or '{}')
+                if snapshot.get('integration_enabled'):
+                    from .integration_service import enqueue_push
+                    try:await enqueue_push(db,cid,bid,snapshot)
+                    except Exception:
+                        await log_runtime(db,f'任务 #{bid} / {account}：本地成功，集成推送暂不可用，请在集成页面核对',level='error',batch_id=bid)
             await progress('接码绑定成功，全流程完成' if good else '接码未完成')
 
     async def pause(self,batch_id):
@@ -280,10 +327,12 @@ class BatchService:
             name,number=prefix,2
             while name in names:name=f'{prefix}-{number}';number+=1
             # 新流程已支付的接码失败项从 paid 继续，不重新扣提链额度。
-            stages=['paid' if m['stage'] in ('bind_failed','paid','binding') and source['workflow_version']==2 else 'pending' for m in members]
-            async with db.execute("INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,amount,note,source_batch_id,workflow_version)"
-                                  " VALUES(?,?,'running','created',?,?,?,?,2)",
-                                  (name,len(members),json.dumps(_counts(stages)),source['amount'] or 10000,source['note'] or '',batch_id)) as cur:new_id=cur.lastrowid
+            stages=['paid' if m['stage'] in ('bind_failed','paid','binding') and source['workflow_version']>=2 else 'pending' for m in members]
+            snapshot=json.loads(source['snapshot_json']) if source['snapshot_json'] else self._legacy_snapshot()
+            async with db.execute("INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,amount,note,source_batch_id,workflow_version,snapshot_json)"
+                                  " VALUES(?,?,'running','created',?,?,?,?,?,?)",
+                                  (name,len(members),json.dumps(_counts(stages)),source['amount'] or 10000,source['note'] or '',batch_id,
+                                   max(3,source['workflow_version']),json.dumps(snapshot))) as cur:new_id=cur.lastrowid
             for m,stage in zip(members,stages):
                 await db.execute('INSERT INTO batch_members(batch_id,credential_id,stage,at_snapshot,upi_task_id) VALUES(?,?,?,?,?)',
                                  (new_id,m['credential_id'],stage,m['at_snapshot'],m['upi_task_id'] if stage=='paid' else None))
@@ -298,5 +347,7 @@ class BatchService:
             if not row:return None
             result=dict(row)
             result['members']=[{k:v for k,v in m.items() if k!='at_snapshot'} for m in await self._members(db,batch_id)]
+            snapshot=json.loads(result.pop('snapshot_json',None) or '{}')
+            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled')})
             return result
         finally:await db.close()

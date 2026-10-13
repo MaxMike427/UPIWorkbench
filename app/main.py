@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
+from contextlib import suppress
 
 import aiosqlite
 from fastapi import FastAPI
@@ -10,10 +12,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api import auth_router, batch_router, config_router, credential_router, dashboard_router, qualification_router, sms_router, upi_router, success_router
+from .api import proxy_router, integration_router
+from .services.integration_service import push_worker,recover_pushes
 from .config import get_settings
 from .database import init_db
 from .services.batch_service import reset_stuck_batches, synchronize_account_statuses
 from .utils import crypto
+from .version import VERSION
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
@@ -36,12 +41,18 @@ async def lifespan(app: FastAPI):
                 (s.admin_username, crypto.hash_password(s.admin_password)),
             )
             await db.commit()
-    yield
+    async with aiosqlite.connect(str(s.db_path)) as db:
+        await recover_pushes(db)
+    worker=asyncio.create_task(push_worker(str(s.db_path)))
+    try:yield
+    finally:
+        worker.cancel()
+        with suppress(asyncio.CancelledError):await worker
 
 
 def create_app() -> FastAPI:
     s = get_settings()
-    app = FastAPI(title=s.title, lifespan=lifespan)
+    app = FastAPI(title=s.title, version=VERSION, lifespan=lifespan)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],
@@ -58,10 +69,12 @@ def create_app() -> FastAPI:
     app.include_router(sms_router.router)
     app.include_router(upi_router.router)
     app.include_router(success_router.router)
+    app.include_router(proxy_router.router)
+    app.include_router(integration_router.router)
 
     @app.get("/api/health")
     async def health():
-        return {"ok": True}
+        return {"ok": True,'version':VERSION}
 
     static_dir = BASE_DIR / "static"
     static_dir.mkdir(exist_ok=True)

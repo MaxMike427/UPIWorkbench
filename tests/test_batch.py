@@ -95,6 +95,7 @@ def _seed(client, h, n=2):
     client.post("/api/credentials/import", files={"file": ("k.txt", lines, "text/plain")}, headers=h)
     client.put("/api/configs/sms_provider.cdk", json={"value": "CDK"}, headers=h)
     client.put("/api/configs/upi_provider.cdk", json={"value": "ohk_test"}, headers=h)
+    client.put('/api/proxies',headers=h,json={'text':'http://proxy.example:8080','enabled':True})
     r = client.get("/api/credentials", params={"page": 1, "page_size": 50}, headers=h)
     return [c["id"] for c in r.json()["items"]]
 

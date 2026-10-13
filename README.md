@@ -1,25 +1,26 @@
 # UPI Workbench
 
-账号任务工作台：导入 TXT 账号 → 资格检查 → ytc 提链支付 → 接码绑定 → 成功库导出。
+账号任务工作台：导入 TXT 账号 → 资格检查 → ytc 提链支付 → 接码绑定（可关闭）→ 成功库导出，并可通过外部代理库和 sub2api 集成扩展流程。
 
-本目录是可发布的脱敏源码副本，不包含运行数据库、账号 TXT、任务报告、JSON 产物、日志、虚拟环境或真实 CDK/API Key。
+本项目使用 FastAPI、SQLite 和原生 Alpine.js 页面。发布源码不包含运行数据库、账号 TXT、任务报告、JSON 产物、日志、虚拟环境或真实 CDK/API Key。
 
 ## 工作区
 
-前端严格保留五个模块：
+V1.1.0 共七个模块：
 
-1. 仪表盘：账号总数、全流程成功数、实时终端日志。
-2. 账号库：TXT 导入、购买链接、账号选择、分页、删除。
-3. 任务管理：创建、执行、暂停/继续、详情、失败重试、TXT/MD 导出。
-4. 成功库：全流程成功账号、TXT 导出、CPA JSON/sub2api JSON/双格式 ZIP 下载。
-5. 设置：管理员密码、接码 CDK、提链支付 CDK、并发控制。
+1. **仪表盘**：账号统计、全流程成功/已成功未接码统计、实时终端日志。
+2. **账号库**：TXT 导入、搜索、分页、跨页选择、精确创建任务和账号删除。
+3. **代理库**：管理 HTTP/HTTPS/SOCKS5 外部代理；关闭或空列表时阻止新 ytc 提链。
+4. **任务管理**：资格检查、ytc 支付、可选接码、暂停/继续、详情、失败重试和 MD/TXT 导出。
+5. **成功库**：区分全流程成功与已成功未接码；后者仅可导出 TXT，不生成伪造 JSON。
+6. **集成**：配置 sub2api 推送模板、读取分组、查看队列、逐条重试或只读核对。
+7. **设置**：管理员密码、接码 CDK、提链支付 CDK、并发、接码开关和 sub2api 连接设置。
 
 ## Quick Start
 
-要求 Python 3.11+。
+要求 Python 3.11+：
 
 ```bash
-cd UPIWorkbench
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
@@ -27,11 +28,20 @@ cp config.example.yaml config.yaml
 python run.py
 ```
 
-默认监听 `127.0.0.1:8000`。首次启动会创建配置中的管理员账号；生产环境启动后请修改密码和 JWT 密钥。
+默认监听 `127.0.0.1:8000`。首次启动创建配置中的管理员账号；生产环境请立即修改密码并使用随机 JWT 密钥。
 
-## 配置
+## 执行规则
 
-`config.yaml` 不纳入版本库，真实密钥只通过本地配置或环境变量提供。重要环境变量：
+- TXT 原 AT 会保存为任务快照；只有资格明确通过的账号才能进入 ytc 提链。
+- ytc 使用 `ohk_...` CDK，最多 5 次尝试；支付结果未确认时继续查询原订单，不重复提交。
+- 新提链任务必须使用已启用且非空的代理库，并通过 `proxy_source=provided`/`proxies` 传给 ytc。
+- 接码默认开启，支付成功后无限间隔重试；关闭接码时写入 `paid_without_sms`，不调用 handy。
+- 接码成功后保存 CPA/sub2api JSON；只有真实接码产物和 Refresh Token 都满足要求时才允许推送 sub2api。
+- sub2api 使用后端 `x-api-key`，Admin Key 不返回前端；推送队列支持幂等、429 等待和结果不确定时只读核对。
+
+## 配置与安全
+
+`config.yaml` 不纳入版本库，真实密钥只通过本地配置或环境变量提供：
 
 | 变量 | 说明 |
 |---|---|
@@ -40,50 +50,27 @@ python run.py
 | `UPI_ADMIN_USER` / `UPI_ADMIN_PASS` | 首次管理员账号/密码 |
 | `UPI_DATA_DIR` | CPA/sub2api 文件保存目录 |
 | `UPI_REPORT_DIR` | 任务 Markdown 记录目录 |
-| `UPI_PURCHASE_URL` | 兼容配置；当前购买入口使用 `static/index.html` 中的明确链接 |
 
-设置页中的两个 CDK 不会回显。ytc 的 `ohk_...` 支付 CDK 用于 ytc 账户认证；接码 CDK 仅用于 handy。
-
-## 执行规则
-
-- TXT 导入的原始 AT 会保存为任务快照。
-- `token_ok=true` 且 `eligible=true` 才能进入提链；查询异常或 HTTP 403 不等同于明确无资格。
-- ytc 提链最多 5 次；支付结果未确认时继续查询原订单，不重复提交。
-- 支付确认成功后接码不限尝试次数，失败按间隔重试；暂停任务不会丢失外部订单。
-- 接码完成后自动下载 CPA 与 sub2api JSON 到 `data/account_exports/`。
-- 每个任务结束写入 `doc/task_reports/task-<id>-YYYYMMDD.md`；报告不写入密码、2FA、AT、CDK 或支付链接。
+代理密码、Admin Key、CDK、账号 TXT、SQLite 和任务产物都必须留在运行环境，不能提交 Git。API 日志、MD 报告和下载接口不返回第三方原始敏感响应。
 
 ## 测试
 
 ```bash
-pytest tests/ -q
+.venv/bin/python -m pytest tests/ -q
 node --test tests/ui_workflow.test.cjs
+.venv/bin/python tests/browser_acceptance.py
 ```
 
-浏览器验收使用隔离 SQLite 和第三方服务替身，不会消耗真实支付/接码额度：
+浏览器验收使用隔离 SQLite、隔离文件目录和第三方内存替身，不会消耗真实支付/接码额度，也不会向真实 sub2api 实例发送账号。
 
-```bash
-python tests/browser_acceptance.py
-```
+## 文档
 
-## 目录说明
+- [`doc/1.1.0.md`](doc/1.1.0.md)：V1.1.0 已实现功能、确认决策、接口和发布验收状态。
+- [`doc/1.1.0-PLAN.md`](doc/1.1.0-PLAN.md)：实现计划与边界。
+- [`doc/20261012.md`](doc/20261012.md)：V1.0 产品需求；七模块升级说明见 V1.1.0 文档。
+- [`doc/IMPLEMENTATION_20261012.md`](doc/IMPLEMENTATION_20261012.md)：V1.0 实现记录及兼容说明。
+- [`INTEGRATION.md`](INTEGRATION.md)：ytc、handy 与资格/备用提链接口核验记录。
 
-- `app/`：FastAPI、SQLite、认证、编排与第三方适配器。
-- `static/index.html`：五模块 Alpine.js/Tailwind CDN 单页界面。
-- `tests/`：后端单元/集成测试、UI 行为测试、隔离浏览器验收。
-- `doc/20261012.md`：最新产品要求。
-- `doc/IMPLEMENTATION_20261012.md`：实现、流程、API 与验收记录。
-- `INTEGRATION.md`：第三方接口实测契约。
+## 版本
 
-## 安全提醒
-
-发布前检查：
-
-1. 不要把 `config.yaml`、SQLite、账号 TXT、任务报告或 `data/account_exports/` 加入 Git。
-2. 使用 HTTPS、强管理员密码和随机 JWT 密钥。
-3. 先在设置页配置 CDK，再执行真实任务。
-4. 真实第三方支付和接码流程可能受账号、额度、线路及平台风控影响。
-
-## Version
-
-Current source release: `v1.0.0`.
+当前源码版本：`1.1.0`。Git `v1.1.0` 标签需待真实第三方联调完成后再创建；当前发布基线标签仍为 `v1.0.0`。

@@ -67,12 +67,13 @@ def _find_link(obj, depth: int = 0):
 
 class YtcUPIProvider:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0,
-                 poll_interval: float = 10.0, wait_for_payment: bool = False):
+                 poll_interval: float = 10.0, wait_for_payment: bool = False,proxies:list[str]|None=None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.wait_for_payment = wait_for_payment
+        self.proxies=proxies or []
         self.should_continue = None
         self.on_progress = None
         self.on_submitted = None
@@ -123,22 +124,26 @@ class YtcUPIProvider:
                                  json={"api_key": self.api_key}, timeout=30.0)
         data = resp.json()
         if isinstance(data, dict) and data.get("ok") is False:
-            raise RuntimeError(f"ytc login failed: {data}"[:300])
-        if resp.status_code >= 400 or data.get("authenticated") is False:
+            raise RuntimeError("ytc 账户认证失败，请检查 CDK")
+        if not isinstance(data,dict) or resp.status_code >= 400 or data.get("authenticated") is False:
             raise RuntimeError("ytc 账户认证失败，请检查服务端 API Key")
 
     async def create_job(self, client: httpx.AsyncClient, at: str,
-                         concurrency: int = 5) -> str:
+                          concurrency: int = 5) -> str:
+        body={"tokens":at.strip(),"concurrency":concurrency,"auto_submit":True,"auto_refresh_expired":True}
+        if self.proxies:body.update({'proxy_source':'provided','proxies':'\n'.join(self.proxies)})
         resp = await client.post(
             f"{self.base_url}/api/jobs",
-            json={"tokens": at.strip(), "concurrency": concurrency,
-                  "auto_submit": True, "auto_refresh_expired": True},
+            json=body,
             timeout=30.0,
         )
         data = resp.json()
         jid = (data or {}).get("id") if isinstance(data, dict) else None
         if not jid:
-            raise RuntimeError(f"ytc createJob rejected: {json.dumps(data)[:300]}")
+            reason=data.get('error') or data.get('reason') if isinstance(data,dict) else ''
+            if reason in ('provided_proxy_required','invalid_proxy','internal_proxy_unavailable'):
+                raise RuntimeError('ytc 代理配置无效或不可用，请检查代理库')
+            raise RuntimeError(f"ytc 创建任务被拒绝（HTTP {resp.status_code}），请检查额度、CDK 和代理")
         return str(jid)
 
     async def poll_results(self, client: httpx.AsyncClient, job_id: str) -> dict:
@@ -223,9 +228,11 @@ class YtcUPIProvider:
             st = polled.get("status", "")
             results = polled.get("results", {})
             if st in YTC_BAD or st in YTC_REVIEW:
+                if st in YTC_REVIEW and self.wait_for_payment:
+                    raise ExecutionPaused('ytc 原订单需要人工核对，保留订单，不重新支付')
                 detail = polled.get("task_error") or ""
-                raise RuntimeError(
-                    f"ytc job {st} {detail}: {json.dumps(polled.get('job', {}))[:200]}")
+                # job.settings 可含代理认证 URI，错误信息只返回阶段与安全错误码。
+                raise RuntimeError(f"ytc job {st} {detail}")
             link = _find_link(results)
             if link and self.wait_for_payment:
                 results = await self._wait_payment(client,jid,results)
@@ -242,7 +249,7 @@ class YtcUPIProvider:
             if items and all((item.get("submission") or {}).get("status")=="completed" for item in items):
                 return results
             if any((item.get("submission") or {}).get("status") in ("failed","cancelled","needs_review") for item in items):
-                raise RuntimeError("ytc 支付未成功，需要人工核对原订单")
+                raise ExecutionPaused("ytc 支付未成功，需要人工核对原订单，不自动重新支付")
             if self.should_continue and not await self.should_continue():
                 raise ExecutionPaused("ytc 原订单仍在等待支付，任务已请求暂停")
             await asyncio.sleep(max(1,self.poll_interval))

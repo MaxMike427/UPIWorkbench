@@ -7,6 +7,7 @@ from ..auth import get_current_admin
 from ..database import get_db, log_action
 from ..models import UPICreateRequest, UPICreateResult
 from ..services.upi_service import UPIService
+from ..services.report_service import safe_error
 
 router = APIRouter(prefix="/api/upi", tags=["upi"])
 
@@ -19,9 +20,18 @@ async def _cfg(db, key: str, default: str = "") -> str:
 
 def _public(task: dict) -> dict:
     t = dict(task)
-    raw = t.get("raw_response") or ""
-    t["raw_response"] = (raw[:2000] + "…") if len(raw) > 2000 else raw
+    # 原始平台响应仅留在本地 DB，可能包含账号 token 或代理认证 URI。
+    t.pop('raw_response',None)
+    if t.get('error_msg'):t['error_msg']=safe_error(t['error_msg'])
     return t
+
+
+async def _ytc_proxies(db,provider):
+    if provider!='ytc':return None
+    async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
+    if await _cfg(db,'proxy.enabled')!='true' or not proxies:
+        raise HTTPException(status_code=400,detail='新提链需要开启代理库并保存有效代理')
+    return proxies
 
 
 @router.post("/create", response_model=UPICreateResult)
@@ -35,8 +45,9 @@ async def create(body: UPICreateRequest, request: Request,
     if not ids:
         raise HTTPException(status_code=400, detail="请提供 credential_ids 或有效的 status 筛选")
     provider = await _cfg(db, "upi_provider.provider", "ytc")
+    proxies=await _ytc_proxies(db,provider)
     ytc_base = await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz")
-    ytc_key = await _cfg(db, "upi_provider.api_key", "")
+    ytc_key = await _cfg(db, "upi_provider.cdk", "") or await _cfg(db, "upi_provider.api_key", "")
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
@@ -44,7 +55,7 @@ async def create(body: UPICreateRequest, request: Request,
         svc = UPIService(db=db, provider=provider, ytc_base_url=ytc_base, ytc_api_key=ytc_key,
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id, concurrency=body.concurrency,
-                         max_retries=body.max_retries, retry_interval=body.retry_interval_s)
+                         max_retries=body.max_retries, retry_interval=body.retry_interval_s,ytc_proxies=proxies)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     res = await svc.create_batch(ids, amount=body.amount, note=body.note,
@@ -88,15 +99,16 @@ async def get_task(task_id: int, admin: dict = Depends(get_current_admin), db=De
 async def retry(task_id: int, request: Request,
                 admin: dict = Depends(get_current_admin), db=Depends(get_db)):
     provider = await _cfg(db, "upi_provider.provider", "ytc")
+    proxies=await _ytc_proxies(db,provider)
     ytc_base = await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz")
-    ytc_key = await _cfg(db, "upi_provider.api_key", "")
+    ytc_key = await _cfg(db, "upi_provider.cdk", "") or await _cfg(db, "upi_provider.api_key", "")
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
     try:
         svc = UPIService(db=db, provider=provider, ytc_base_url=ytc_base, ytc_api_key=ytc_key,
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
-                         promo_id=promo_id)
+                         promo_id=promo_id,ytc_proxies=proxies)
     except RuntimeError as e:
         raise HTTPException(status_code=400, detail=str(e))
     try:

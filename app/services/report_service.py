@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from datetime import datetime
 
@@ -15,6 +16,7 @@ def safe_error(value: str) -> str:
         "token-401": "访问令牌失效", "no_link": "未获取到支付链接", "no-next-action": "未获取到支付链接",
         "SentinelFlowUnavailableError": "接码平台登录校验失败", "timeout": "等待平台结果超时",
         "fetch-error": "平台网络请求失败", "quota": "平台额度不足",
+        "代理": "代理连接异常，请检查代理库", "proxy": "代理连接异常，请检查代理库",
     }
     for needle, text in labels.items():
         if needle in str(value):
@@ -30,13 +32,16 @@ async def write_task_report(db,batch_id:int) -> str:
         " WHERE m.batch_id=? ORDER BY m.credential_id",(batch_id,)) as cur:
         members=[dict(r) async for r in cur]
     success=sum(m["stage"] in ("done","upi_ok") for m in members)
+    no_sms=sum(m['stage']=='paid_without_sms' for m in members)
     labels={"done":"全流程成功","upi_ok":"历史流程成功","qual_failed":"资格检查失败", "upi_failed":"提链支付失败",
-            "paid":"支付成功，待接码","bind_failed":"接码失败","qualified":"资格通过","pending":"未执行"}
+            "paid":"支付成功，待接码","paid_without_sms":"已成功未接码","bind_failed":"接码失败","qualified":"资格通过","pending":"未执行"}
+    snapshot=json.loads(batch['snapshot_json'] or '{}') if batch['snapshot_json'] else {}
+    flow='TXT 原 AT → 资格检查 → ytc 提链支付 → 已成功未接码 → 成功库' if snapshot.get('sms_enabled') is False else 'TXT 原 AT → 资格检查 → ytc 提链支付 → 自动接码绑定 → 成功库'
     lines=[f"# UPI 任务 #{batch_id} 执行记录", "",
            f"- 记录时间：{datetime.now().isoformat(timespec='seconds')}",
            f"- 任务状态：{'成功' if batch['status']=='completed' else '失败'}",
-           f"- 流程：TXT 原 AT → 资格检查 → ytc 提链支付 → 自动接码绑定 → 成功库",
-           f"- 总账号：{len(members)}；成功：{success}；未成功：{len(members)-success}",
+           f"- 流程：{flow}",
+           f"- 总账号：{len(members)}；全流程成功：{success}；已成功未接码：{no_sms}；未成功：{len(members)-success-no_sms}",
            f"- 来源任务：{batch['source_batch_id'] or '原始任务'}", "",
            "| 邮箱账号 | 执行结果 | 说明 |","|---|---|---|"]
     for m in members:

@@ -3,20 +3,29 @@ from __future__ import annotations
 
 from ..utils.parser import to_success_txt_row
 
-SUCCESS_FILTER = (
-    "EXISTS (SELECT 1 FROM batch_members m JOIN task_batches b ON b.id=m.batch_id"
-    " WHERE m.credential_id=c.id AND ((b.workflow_version=1 AND m.stage='upi_ok')"
-    " OR (b.workflow_version=2 AND m.stage='done'"
-    " AND EXISTS (SELECT 1 FROM sms_tasks s WHERE s.id=m.sms_task_id AND s.credential_id=c.id AND s.status='bound')"
-    " AND EXISTS (SELECT 1 FROM upi_tasks p WHERE p.id=m.upi_task_id AND p.credential_id=c.id AND p.status='success'))))"
-    " AND EXISTS (SELECT 1 FROM upi_tasks u WHERE u.credential_id=c.id"
-    " AND u.status='success' AND COALESCE(u.upi_link,'')!='')"
-)
+SUCCESS_FILTER = """
+EXISTS (
+  SELECT 1 FROM batch_members m JOIN task_batches b ON b.id=m.batch_id
+  WHERE m.credential_id=c.id AND (
+    (b.workflow_version=1 AND m.stage='upi_ok')
+    OR (b.workflow_version>=2 AND m.stage='done'
+      AND EXISTS (SELECT 1 FROM sms_tasks s WHERE s.id=m.sms_task_id AND s.credential_id=c.id AND s.status='bound')
+      AND EXISTS (SELECT 1 FROM upi_tasks p WHERE p.id=m.upi_task_id AND p.credential_id=c.id AND p.status='success'))
+    OR (b.workflow_version>=3 AND m.stage='paid_without_sms'
+      AND EXISTS (SELECT 1 FROM upi_tasks p WHERE p.id=m.upi_task_id AND p.credential_id=c.id AND p.status='success'))
+  )
+) AND EXISTS (SELECT 1 FROM upi_tasks u WHERE u.credential_id=c.id AND u.status='success' AND COALESCE(u.upi_link,'')!='')
+"""
 
 
 async def count_successes(db) -> int:
     async with db.execute(f"SELECT COUNT(*) AS c FROM credentials c WHERE {SUCCESS_FILTER}") as cur:
         return (await cur.fetchone())["c"]
+
+
+async def count_full_successes(db)->int:
+    async with db.execute(f"SELECT COUNT(*) AS c FROM credentials c WHERE {SUCCESS_FILTER} AND EXISTS(SELECT 1 FROM batch_members m WHERE m.credential_id=c.id AND m.stage IN ('done','upi_ok'))") as cur:
+        return (await cur.fetchone())['c']
 
 
 async def list_successes(db, keyword: str | None = None, page: int = 1, page_size: int = 50) -> dict:
@@ -29,6 +38,8 @@ async def list_successes(db, keyword: str | None = None, page: int = 1, page_siz
         total = (await cur.fetchone())["c"]
     async with db.execute(
         "SELECT c.id, c.account, c.updated_at,"
+        " CASE WHEN EXISTS(SELECT 1 FROM batch_members done WHERE done.credential_id=c.id AND done.stage IN ('done','upi_ok'))"
+        " THEN 'done' ELSE 'paid_without_sms' END AS status,"
         " (SELECT u.upi_link FROM upi_tasks u WHERE u.credential_id=c.id AND u.status='success'"
         " AND COALESCE(u.upi_link,'')!='' ORDER BY u.id DESC LIMIT 1) AS upi_link"
         f" FROM credentials c WHERE {where} ORDER BY c.id DESC LIMIT ? OFFSET ?",
@@ -59,7 +70,7 @@ async def export_successes(db, ids: list[int] | None = None, batch_id: int | Non
         args.extend(ids)
     if batch_id is not None:
         where += " AND EXISTS (SELECT 1 FROM batch_members bm WHERE bm.batch_id=?"
-        where += " AND bm.credential_id=c.id AND bm.stage IN ('done','upi_ok'))"
+        where += " AND bm.credential_id=c.id AND bm.stage IN ('done','upi_ok','paid_without_sms'))"
         args.append(batch_id)
     async with db.execute(
         f"SELECT c.id,c.account,c.password,COALESCE(c.twofa_secret,'') AS twofa FROM credentials c"

@@ -32,6 +32,7 @@ class UPIService:
                  max_retries: int = 5, retry_interval: float = 120.0,
                  ytc_payment_cdk: str = "",
                  wait_for_payment: bool = False,
+                 ytc_proxies: list[str] | None = None,
                  # 兼容旧构造（nerver 直参）
                  base_url: str | None = None, api_key: str | None = None):
         self.db = db
@@ -45,7 +46,7 @@ class UPIService:
             if not ytc_api_key:
                 raise RuntimeError("upi_provider.api_key（ohk_）未配置")
             self.provider = YtcUPIProvider(ytc_base_url, ytc_api_key, timeout=timeout,
-                                           poll_interval=ytc_poll_interval, wait_for_payment=wait_for_payment)
+                                           poll_interval=ytc_poll_interval, wait_for_payment=wait_for_payment,proxies=ytc_proxies)
         elif provider == "nerver":
             self.provider = NerverUPIProvider(nerver_base_url, nerver_api_key, promo_id,
                                               pool_keep, pool_max, timeout=timeout)

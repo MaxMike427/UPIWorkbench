@@ -61,6 +61,10 @@ async def package_exports(db,ids:list[int],fmt:str) -> bytes:
                           f" AND c.id IN ({','.join('?' for _ in ids)})",ids) as cur:
         eligible={r['id'] async for r in cur}
     if eligible!=set(ids):raise ValueError('部分账号不存在或尚未完成全流程')
+    async with db.execute(f"SELECT c.id FROM credentials c WHERE c.id IN ({','.join('?' for _ in ids)})"
+                          " AND NOT EXISTS(SELECT 1 FROM batch_members m WHERE m.credential_id=c.id AND m.stage IN ('done','upi_ok'))",ids) as cur:
+        without_sms=await cur.fetchone()
+    if without_sms:raise FileNotFoundError('选中账号尚未接码，暂无 CPA/sub2api JSON，可导出 TXT')
     formats=['cpa','sub2'] if fmt=='both' else [fmt]
     root=(get_settings().data_dir.resolve()/'account_exports')
     files=[]
