@@ -493,9 +493,9 @@ def test_integration_cannot_be_enabled_without_url_and_admin_key(client):
 def test_v110_version_file_matches_api(client):
     from pathlib import Path
     r=client.get('/api/health')
-    assert r.json()['version']=='1.1.0'
+    assert r.json()['version']=='1.2.0'
     root=Path(__file__).parents[1]
-    assert '1.1.0' in (root/'VERSION').read_text()
+    assert '1.2.0' in (root/'VERSION').read_text()
 
 
 def test_generic_config_cannot_bypass_integration_template_validation(client):

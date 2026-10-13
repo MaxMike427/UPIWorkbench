@@ -221,7 +221,7 @@ def test_settings_do_not_expose_api_key_and_reject_masked_overwrite(client):
     assert "ohk_secret-test" not in json.dumps(all_configs)
     visible = client.get("/api/configs/workspace", headers=h)
     assert visible.status_code == 200
-    assert {c["key"] for c in visible.json()} == {"sms_provider.cdk", "upi_provider.cdk", "app.concurrency",'sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key'}
+    assert {c["key"] for c in visible.json()} == {"sms_provider.cdk", "upi_provider.cdk", "sms_provider.provider", "upi_provider.provider", "app.concurrency",'sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key'}
     assert client.put("/api/configs/sms_provider.cdk", json={"value": "****"}, headers=h).status_code == 400
 
 

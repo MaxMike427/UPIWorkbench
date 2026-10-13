@@ -176,9 +176,10 @@ DEFAULT_CONFIGS = [
     ("qualification.api_url", "https://cha.nerver.cc", "资格检查接口地址"),
     ("qualification.api_key", "", "资格检查访问密钥"),
     ("qualification.promo_id", "plus-1-month-free", "优惠活动编号"),
+    ("sms_provider.provider", "handy", "接码服务商"),
     ("sms_provider.base_url", "https://apihub.space/handy", "接码平台接口地址"),
+    ("upi_provider.provider", "ytc", "提炼/支付服务商"),
     ("upi_provider.base_url", "https://ytc.xxsyun.xyz", "提链平台接口地址"),
-    ("upi_provider.provider", "ytc", "提链服务商（ytc 主服务 / nerver 备用）"),
     ("upi_provider.api_key", "", "提链平台访问密钥（ohk_ 开头）"),
 ]
 

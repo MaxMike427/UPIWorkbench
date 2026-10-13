@@ -11,7 +11,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from .api import auth_router, batch_router, config_router, credential_router, dashboard_router, qualification_router, sms_router, upi_router, success_router
+from .api import auth_router, batch_router, config_router, credential_router, dashboard_router, qualification_router, sms_router, upi_router, success_router, provider_router
 from .api import proxy_router, integration_router
 from .services.integration_service import push_worker,recover_pushes
 from .config import get_settings
@@ -70,6 +70,7 @@ def create_app() -> FastAPI:
     app.include_router(upi_router.router)
     app.include_router(success_router.router)
     app.include_router(proxy_router.router)
+    app.include_router(provider_router.router)
     app.include_router(integration_router.router)
 
     @app.get("/api/health")

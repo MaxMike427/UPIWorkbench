@@ -90,7 +90,9 @@ class BatchService:
               'api_key':await cfg('qualification.api_key'),'promo_id':await cfg('qualification.promo_id','plus-1-month-free')}
         sms={'base_url':await cfg('sms_provider.base_url','https://apihub.space/handy'),'cdk':await cfg('sms_provider.cdk'),
               'concurrency':concurrency,'max_retries':None,'retry_interval':120.0}
-        upi={'provider':'ytc','ytc_base_url':await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
+        upi_provider=await cfg('upi_provider.provider','ytc')
+        if upi_provider=='local_zero_link':upi_provider='local'
+        upi={'provider':upi_provider,'ytc_base_url':await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
              'ytc_api_key':await cfg('upi_provider.cdk') or await cfg('upi_provider.api_key'),
              'wait_for_payment':True,'max_retries':5,'retry_interval':120.0,'concurrency':concurrency}
         return cls(db_path,qual,sms,upi,concurrency=concurrency)

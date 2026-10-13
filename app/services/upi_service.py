@@ -9,7 +9,8 @@ from dataclasses import dataclass, field
 import httpx
 
 from ..utils.helpers import utcnow_iso
-from .upi_providers import ExecutionPaused, NerverUPIProvider, YtcUPIProvider
+from .upi_providers import (ExecutionPaused, LocalUPIProvider, NerverUPIProvider,
+    YtcUPIProvider)
 from .report_service import safe_error
 
 
@@ -50,6 +51,10 @@ class UPIService:
         elif provider == "nerver":
             self.provider = NerverUPIProvider(nerver_base_url, nerver_api_key, promo_id,
                                               pool_keep, pool_max, timeout=timeout)
+        elif provider == "local":
+            self.provider = LocalUPIProvider(base_url=ytc_base_url or nerver_base_url,
+                                             proxies=ytc_proxies or [], timeout=timeout,
+                                             extract_func=None)
         else:
             raise ValueError(f"未知提链 provider: {provider}")
         self.concurrency = max(1, concurrency)

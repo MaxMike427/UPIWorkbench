@@ -14,6 +14,16 @@ import json
 import time
 import asyncio
 
+try:
+    from app.upi_zero_link.protocol import extract as _local_extract
+except Exception:
+    try:
+        import sys
+        sys.path.insert(0, '/tmp/opencode/upi-zero-link')
+        from upi_zero_link.protocol import extract as _local_extract
+    except Exception:
+        _local_extract = None
+
 import httpx
 
 YTC_OK = {"succeeded", "paid", "link_ready"}
@@ -64,6 +74,36 @@ def _find_link(obj, depth: int = 0):
     _walk(obj)
     return (good or found or [""])[0]
 
+
+
+
+class LocalUPIProvider:
+    """本地零元提链：复用 upi-zero-link 协议，支持代理输入。"""
+    def __init__(self, base_url="", proxies=None, timeout=600.0, extract_func=None):
+        self.base_url=base_url
+        self.proxies=list(proxies or [])
+        self.timeout=timeout
+        self.extract_func=extract_func or _local_extract
+        self.should_continue=None
+        self.on_progress=None
+        self.on_submitted=None
+
+    async def fetch_link(self, at, concurrency=1, job_id=None):
+        if self.extract_func is None:
+            raise RuntimeError("本地提炼依赖未安装（curl_cffi/upi-zero-link）")
+        import asyncio
+        account={"email":"","access_token":at.strip(),"session_token":""}
+        proxy=self.proxies[0] if self.proxies else ""
+        result=await asyncio.to_thread(self.extract_func, account, proxy)
+        if isinstance(result, dict) and result.get("ok"):
+            link=result.get("url") or result.get("hosted_instructions_url") or ""
+            if not link:
+                raise RuntimeError("local link missing")
+            if self.on_submitted:
+                await self.on_submitted("local")
+            return link, {"provider":"local","result":result}
+        reason=result.get("error") if isinstance(result, dict) else "local failed"
+        raise RuntimeError(str(reason))
 
 class YtcUPIProvider:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0,

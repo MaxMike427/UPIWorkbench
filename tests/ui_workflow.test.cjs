@@ -151,7 +151,7 @@ test('concurrency control only saves nonzero positive integers', async () => {
 
 test('purchase and CDK action links are hardcoded at their requested locations', () => {
   const accounts=html.match(/<section x-show="tab==='credentials'"[\s\S]*?<\/section>/)[0];
-  const settings=html.match(/<template x-for="c in configs"[\s\S]*?<\/template>/)[0];
+  const settings=html.match(/<section x-show="tab==='settings'"[\s\S]*?<\/section>/)[0];
   const links=[
     [accounts,'https://wzyp.cn/shop/CPZF8PBK','去购买 · 0217'],
     [accounts,'https://wzyp.cn/shop/8UOIIRW2','去购买 · AI 批发商'],

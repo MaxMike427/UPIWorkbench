@@ -46,10 +46,10 @@ def _masked(key: str, value: str) -> tuple[str, bool]:
 
 @router.get("/workspace", response_model=list[ConfigItem])
 async def workspace_configs(admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    async with db.execute("SELECT key,value FROM configs WHERE key IN ('sms_provider.cdk','upi_provider.cdk','upi_provider.api_key','app.concurrency','sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key')") as cur:
+    async with db.execute("SELECT key,value FROM configs WHERE key IN ('sms_provider.cdk','sms_provider.provider','upi_provider.cdk','upi_provider.api_key','upi_provider.provider','app.concurrency','sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key')") as cur:
         values = {row["key"]: row["value"] async for row in cur}
     out = []
-    for key, description in (("sms_provider.cdk", "接码 CDK"), ("upi_provider.cdk", "提链支付 CDK")):
+    for key, description in (("sms_provider.cdk", "接码 CDK"), ("upi_provider.cdk", "提链支付 CDK"), ("sms_provider.provider", "接码服务商"), ("upi_provider.provider", "提炼/支付服务商")):
         raw = values.get(key, "")
         if key=="upi_provider.cdk" and not raw:
             raw=values.get("upi_provider.api_key", "")
