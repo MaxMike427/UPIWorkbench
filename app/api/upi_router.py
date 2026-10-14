@@ -7,6 +7,7 @@ from ..auth import get_current_admin
 from ..database import get_db, log_action
 from ..models import UPICreateRequest, UPICreateResult
 from ..services.upi_service import UPIService
+from ..services.upi_providers import select_ytc_api_key
 from ..services.report_service import safe_error
 
 router = APIRouter(prefix="/api/upi", tags=["upi"])
@@ -38,9 +39,10 @@ async def _provider_settings(db) -> dict:
         "payment_base_url": await _cfg(db, "payment_provider.base_url", "https://masi.cc.cd"),
         "payment_cdk": await _cfg(db, "payment_provider.cdk", ""),
         "ytc_proxy_source": await _cfg(db, "ytc.proxy_source", "auto"),
-        "key": await _cfg(db, "extract_provider.cdk", "")
-               or await _cfg(db, "upi_provider.cdk", "")
-               or await _cfg(db, "upi_provider.api_key", ""),
+        "key": select_ytc_api_key(await _cfg(db, "extract_provider.cdk", ""),
+                                   await _cfg(db, "payment_provider.cdk", ""),
+                                   await _cfg(db, "upi_provider.cdk", ""),
+                                   await _cfg(db, "upi_provider.api_key", "")),
     }
 
 
@@ -92,6 +94,7 @@ async def create(body: UPICreateRequest, request: Request,
         svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
                          payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
                          payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
+                         ytc_proxy_source=settings.get('ytc_proxy_source','auto'),
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id, concurrency=body.concurrency,
                          max_retries=body.max_retries, retry_interval=body.retry_interval_s,ytc_proxies=proxies)
@@ -149,6 +152,7 @@ async def retry(task_id: int, request: Request,
         svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
                          payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
                          payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
+                         ytc_proxy_source=settings.get('ytc_proxy_source','auto'),
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id,ytc_proxies=proxies)
     except RuntimeError as e:

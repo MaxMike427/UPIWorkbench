@@ -48,6 +48,15 @@ class ExecutionPaused(RuntimeError):
     """外部订单仍存在，停止本地等待但不可重新提交。"""
 
 
+def select_ytc_api_key(*values: str) -> str:
+    """优先选择 ytc 的 ohk_ API Key，避免误把其它提炼 CDK 当成登录凭证。"""
+    values=[str(value or '').strip() for value in values]
+    for value in values:
+        if value.lower().startswith('ohk_'):
+            return value
+    return next((value for value in values if value), '')
+
+
 def _find_link(obj, depth: int = 0):
     """在 results JSON 里找支付链接。ytc 实测：items[].url；其它键走通用搜索。"""
     if isinstance(obj, dict):
@@ -163,13 +172,15 @@ class MasiPaymentProvider:
 
 class YtcUPIProvider:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0,
-                 poll_interval: float = 10.0, wait_for_payment: bool = False,proxies:list[str]|None=None):
+                 poll_interval: float = 10.0, wait_for_payment: bool = False,
+                 proxies:list[str]|None=None, proxy_source: str = 'auto'):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.timeout = timeout
         self.poll_interval = poll_interval
         self.wait_for_payment = wait_for_payment
         self.proxies=proxies or []
+        self.proxy_source=proxy_source if proxy_source in ('auto','internal','provided') else 'auto'
         self.should_continue = None
         self.on_progress = None
         self.on_submitted = None
@@ -227,7 +238,13 @@ class YtcUPIProvider:
     async def create_job(self, client: httpx.AsyncClient, at: str,
                           concurrency: int = 5) -> str:
         body={"tokens":at.strip(),"concurrency":concurrency,"auto_submit":True,"auto_refresh_expired":True}
-        if self.proxies:body.update({'proxy_source':'provided','proxies':'\n'.join(self.proxies)})
+        source=self.proxy_source
+        if source=='auto':source='provided' if self.proxies else 'internal'
+        body['proxy_source']=source
+        if source=='provided':
+            if not self.proxies:
+                raise RuntimeError('ytc 已选择 provided，但本地代理库为空')
+            body['proxies']='\n'.join(self.proxies)
         resp = await client.post(
             f"{self.base_url}/api/jobs",
             json=body,

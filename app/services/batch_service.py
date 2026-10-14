@@ -15,6 +15,7 @@ from .proxy_service import session_variant
 from .qualification_service import QualificationService
 from .sms_service import SMSService
 from .upi_service import UPIService
+from .upi_providers import select_ytc_api_key
 from .report_service import safe_error, write_task_report
 
 _RUNNING: dict[tuple[str,int], asyncio.Task] = {}
@@ -121,7 +122,7 @@ class BatchService:
              'payment_provider':payment_provider,
              'ytc_proxy_source':ytc_proxy_source,
              'ytc_base_url':await cfg('extract_provider.base_url') or await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
-             'ytc_api_key':extract_cdk or legacy_cdk,
+             'ytc_api_key':select_ytc_api_key(extract_cdk, payment_cdk, legacy_cdk),
              'payment_base_url':payment_base_url,
              'payment_cdk':payment_cdk,
              'wait_for_payment':True,'max_retries':5,'retry_interval':120.0,'concurrency':concurrency}

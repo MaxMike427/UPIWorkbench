@@ -50,6 +50,44 @@ def test_workspace_exposes_independent_extract_and_payment_settings(client):
             "payment_provider.provider", "payment_provider.cdk"} <= keys
 
 
+def test_ytc_uses_ohk_api_key_over_non_ytc_extract_cdk(client):
+    headers = login(client)
+    client.put("/api/configs/extract_provider.cdk",
+               json={"value": "LUMEN-CDK"}, headers=headers)
+    client.put("/api/configs/upi_provider.api_key",
+               json={"value": "ohk_legacy-api-key"}, headers=headers)
+
+    import aiosqlite
+    import asyncio
+    from app.services.batch_service import BatchService
+
+    async def load():
+        async with aiosqlite.connect(client._v120_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            return (await BatchService.from_db(db, client._v120_db_path)).upi["ytc_api_key"]
+
+    assert asyncio.run(load()) == "ohk_legacy-api-key"
+
+
+@pytest.mark.asyncio
+async def test_ytc_builtin_proxy_mode_sends_internal_source(monkeypatch):
+    from app.services.upi_providers import YtcUPIProvider
+
+    sent = []
+
+    async def post(self, url, **kwargs):
+        sent.append(kwargs.get("json"))
+        return type("Response", (), {"status_code": 200, "json": lambda self: {"id": "job"}})()
+
+    monkeypatch.setattr("httpx.AsyncClient.post", post)
+    provider = YtcUPIProvider("https://ytc.example", "ohk_test", proxy_source="internal")
+    import httpx
+    async with httpx.AsyncClient() as client:
+        await provider.create_job(client, "eyJtoken", 1)
+    assert sent[0]["proxy_source"] == "internal"
+    assert "proxies" not in sent[0]
+
+
 def test_batch_snapshot_keeps_provider_choices_and_auto_push_flag(client):
     headers = login(client)
     content = "a@example.com---pw---2fa---eyJv120token\n"
