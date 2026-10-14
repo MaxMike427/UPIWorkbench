@@ -33,6 +33,7 @@ class UPIService:
                  timeout: float = 600.0, concurrency: int = 3,
                  ytc_poll_interval: float = 10.0,
                  max_retries: int = 5, retry_interval: float = 120.0,
+                 ytc_proxy_source: str = "auto",
                  ytc_payment_cdk: str = "",
                  wait_for_payment: bool = False,
                  ytc_proxies: list[str] | None = None,

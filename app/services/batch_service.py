@@ -19,6 +19,15 @@ from .report_service import safe_error, write_task_report
 
 _RUNNING: dict[tuple[str,int], asyncio.Task] = {}
 
+
+def _uses_external_ytc_proxy(snapshot: dict) -> bool:
+    """是否需要把本地代理池作为 ytc 的 provided proxy 传入。"""
+    if snapshot.get('extract_provider') != 'ytc':
+        return False
+    if snapshot.get('ytc_proxy_source') == 'provider':
+        return False
+    return bool(snapshot.get('proxy_enabled') and snapshot.get('proxies'))
+
 ACCOUNT_STAGE_STATUS = {
     'pending':'pending', 'qualified':'qualified', 'paid':'processing', 'binding':'processing',
     'done':'done', 'upi_ok':'done', 'bound':'processing',
@@ -107,8 +116,10 @@ class BatchService:
         payment_base_url=await cfg('payment_provider.base_url','https://masi.cc.cd')
         if payment_provider=='masi' and payment_base_url.rstrip('/')=='https://upi.xxsyun.xyz':
             payment_base_url='https://masi.cc.cd'
+        ytc_proxy_source=await cfg('ytc.proxy_source','auto')
         upi={'provider':upi_provider,'extract_provider':extract_provider,
              'payment_provider':payment_provider,
+             'ytc_proxy_source':ytc_proxy_source,
              'ytc_base_url':await cfg('extract_provider.base_url') or await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
              'ytc_api_key':extract_cdk or legacy_cdk,
              'payment_base_url':payment_base_url,
@@ -173,14 +184,15 @@ class BatchService:
                 'proxies':proxies,'integration_enabled':config.get('sub2api.enabled','false')=='true',
                 'integration_url':config.get('sub2api.base_url',''),'integration_template':json.loads(config.get('sub2api.template') or '{}'),
                 'auto_push':bool(auto_push),'extract_provider':extract_provider,
-                'payment_provider':payment_provider,'sms_provider':config.get('sms_provider.provider','handy')}
+                'payment_provider':payment_provider,'sms_provider':config.get('sms_provider.provider','handy'),
+                'ytc_proxy_source':config.get('ytc.proxy_source','auto')}
 
     @staticmethod
     def _legacy_snapshot():
         """V1.0 任务没有快照，重试必须沿用原流程而非读取当前全局开关。"""
         return {'legacy':True,'sms_enabled':True,'proxy_enabled':False,'proxies':[],
                 'integration_enabled':False,'integration_url':'',
-                'integration_template':{},'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc','sms_provider':'handy'}
+                'integration_template':{},'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc','sms_provider':'handy','ytc_proxy_source':'provided'}
 
     async def validate_start(self,db,bid):
         async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(bid,)) as cur:batch=await cur.fetchone()
@@ -215,7 +227,8 @@ class BatchService:
         async with db.execute("SELECT m.credential_id FROM batch_members m WHERE m.batch_id=? AND m.stage IN ('pending','qualified','upi_failed','qual_failed')"
                               " AND NOT EXISTS(SELECT 1 FROM upi_tasks u WHERE u.credential_id=m.credential_id AND u.status='processing' AND u.external_job_id IS NOT NULL)",(bid,)) as cur:
             requires_proxy=await cur.fetchone()
-        if batch['workflow_version'] >= 3 and not snapshot.get('legacy') and requires_proxy and (not snapshot.get('proxy_enabled') or not snapshot.get('proxies')):
+        needs_external_proxy = snapshot.get('ytc_proxy_source','provided') == 'provided'
+        if batch['workflow_version'] >= 3 and not snapshot.get('legacy') and requires_proxy and needs_external_proxy and (not snapshot.get('proxy_enabled') or not snapshot.get('proxies')):
             raise ValueError('新提链需要开启代理库并保存有效代理，请重新创建含代理快照的任务')
 
     def start(self,batch_id:int):
@@ -329,7 +342,8 @@ class BatchService:
         elif step=='upi':
             snapshot=json.loads(batch['snapshot_json'] or '{}')
             options=dict(self.upi)
-            if snapshot.get('proxy_enabled') and snapshot.get('proxies'):
+            use_external_proxy = snapshot.get('ytc_proxy_source','provided') != 'provider' and snapshot.get('proxy_enabled') and snapshot.get('proxies')
+            if use_external_proxy:
                 # 账号固定使用创建任务时分配的代理（含独立粘性会话），原订单恢复时不切换。
                 options['ytc_proxies']=[m['proxy_url'] or snapshot['proxies'][(cid-1)%len(snapshot['proxies'])]]
             svc=UPIService(db=db,**options)
@@ -425,6 +439,6 @@ class BatchService:
             result=dict(row)
             result['members']=[{k:v for k,v in m.items() if k not in ('at_snapshot','proxy_url')} for m in await self._members(db,batch_id)]
             snapshot=json.loads(result.pop('snapshot_json',None) or '{}')
-            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider')})
+            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider','ytc_proxy_source')})
             return result
         finally:await db.close()

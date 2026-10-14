@@ -20,6 +20,8 @@ SENSITIVE_SUFFIX = (".cdk", ".key", ".api_key", ".admin_key", ".secret", ".passw
 def validate_config(key,value):
     if key in ('sms.enabled','sub2api.enabled','proxy.enabled') and value not in ('true','false'):
         raise ValueError('开关必须为 true 或 false')
+    if key=='ytc.proxy_source' and value not in ('auto','provider','provided'):
+        raise ValueError('ytc 代理来源必须为 auto、provider 或 provided')
     if key in ('sms_provider.provider','extract_provider.provider','payment_provider.provider','upi_provider.provider'):
         from ..services.provider_catalog import get_provider
         item=get_provider(value)
@@ -57,7 +59,7 @@ def _masked(key: str, value: str) -> tuple[str, bool]:
 
 @router.get("/workspace", response_model=list[ConfigItem])
 async def workspace_configs(admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    async with db.execute("SELECT key,value FROM configs WHERE key IN ('sms_provider.cdk','sms_provider.provider','upi_provider.cdk','upi_provider.api_key','upi_provider.provider','app.concurrency','sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key','extract_provider.cdk','extract_provider.provider','payment_provider.cdk','payment_provider.provider')") as cur:
+    async with db.execute("SELECT key,value FROM configs WHERE key IN ('sms_provider.cdk','sms_provider.provider','upi_provider.cdk','upi_provider.api_key','upi_provider.provider','app.concurrency','sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key','extract_provider.cdk','extract_provider.provider','payment_provider.cdk','payment_provider.provider','ytc.proxy_source')") as cur:
         values = {row["key"]: row["value"] async for row in cur}
     out = []
     for key, description in (("sms_provider.cdk", "接码 CDK"), ("upi_provider.cdk", "提链支付 CDK"), ("extract_provider.cdk", "提炼 CDK"), ("payment_provider.cdk", "支付 CDK"), ("sms_provider.provider", "接码服务商"), ("upi_provider.provider", "提炼/支付服务商"), ("extract_provider.provider", "提炼服务商"), ("payment_provider.provider", "支付服务商")):
@@ -67,6 +69,7 @@ async def workspace_configs(admin: dict = Depends(get_current_admin), db=Depends
         value, masked = _masked(key, raw)
         out.append({"key":key,"description":description,"value":value,"masked":masked})
     out.append({'key':'app.concurrency','description':'并发控制','value':values.get('app.concurrency','3'),'masked':False})
+    out.append({'key':'ytc.proxy_source','description':'ytc 代理来源','value':values.get('ytc.proxy_source','auto'),'masked':False})
     for key in ('sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key'):
         value,masked=_masked(key,values.get(key,''))
         out.append({'key':key,'description':key,'value':value,'masked':masked})

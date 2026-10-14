@@ -173,6 +173,7 @@ DEFAULT_CONFIGS = [
     ("extract_provider.provider", "ytc", "提炼服务商"),
     ("extract_provider.base_url", "https://ytc.xxsyun.xyz", "提炼平台接口地址"),
     ("extract_provider.cdk", "", "提炼平台兑换码"),
+    ("ytc.proxy_source", "auto", "ytc 代理来源（auto/provider/provided）"),
     ("payment_provider.provider", "ytc", "支付服务商"),
     ("payment_provider.base_url", "https://masi.cc.cd", "支付平台接口地址"),
     ("payment_provider.cdk", "", "支付平台兑换码"),

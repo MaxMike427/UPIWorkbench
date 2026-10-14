@@ -401,6 +401,7 @@ def test_sms_disabled_and_no_proxy_blocks_new_payment_without_sms_requirement(cl
     client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
     client.put('/api/configs/sms_provider.cdk',headers=h,json={'value':'sms_test'})
     client.put('/api/configs/sms.enabled',headers=h,json={'value':'false'})
+    client.put('/api/configs/ytc.proxy_source',headers=h,json={'value':'provided'})
     bid=client.post('/api/batches',headers=h,json={'name':'无代理','credential_ids':[1]}).json()['id']
     r=client.post(f'/api/batches/{bid}/start',headers=h)
     assert r.status_code==400 and '代理' in r.json()['detail']
@@ -579,6 +580,7 @@ def test_legacy_ytc_create_api_cannot_bypass_disabled_proxy_library(client,monke
     client.post('/api/credentials/import',headers=h,files={'file':('a.txt','a@example.com---pw---2FA---eyJoriginal')})
     client.put('/api/configs/upi_provider.cdk',headers=h,json={'value':'ohk_test'})
     client.put('/api/configs/upi_provider.api_key',headers=h,json={'value':'ohk_test'})
+    client.put('/api/configs/ytc.proxy_source',headers=h,json={'value':'provided'})
     async def forbidden(*args,**kwargs):raise AssertionError('无代理时不能提交新单')
     monkeypatch.setattr(httpx.AsyncClient,'post',forbidden)
     r=client.post('/api/upi/create',headers=h,json={'credential_ids':[1],'amount':100,'retry_interval_s':0})

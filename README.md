@@ -34,7 +34,7 @@ python run.py
 
 - TXT 原 AT 会保存为任务快照；只有资格明确通过的账号才能进入提炼步骤。
 - 提炼与支付服务商独立保存；ytc/Nerver 可作为提炼支付一体服务商，选择综合服务商时两项选择相同；本地提炼参考 [`upi-zero-link`](https://github.com/wangshen233/upi-zero-link)，本地链接可交给已接入的支付服务商。
-- 新远程提炼任务必须使用已启用且非空的代理库，并通过 `proxy_source=provided`/`proxies` 传给 ytc；本地提炼按账号使用任务快照代理。
+- ytc 代理来源可在设置中选择：`auto`（默认，本地代理优先、没有本地代理时使用 ytc 内置代理）、`provider`（始终使用 ytc 内置代理）或 `provided`（强制使用本地代理库）；本地提炼按账号使用任务快照代理。
 - 接码默认开启，支付成功后无限间隔重试；关闭接码时写入 `paid_without_sms`，不调用 handy。
 - 接码成功后保存 CPA/sub2api JSON；每个任务可选择是否按任务快照自动推送，也支持成功库单选/多选后手动推送；真实接码产物和 Refresh Token 必须满足要求。
 - sub2api 使用后端 `x-api-key`，Admin Key 不返回前端；推送队列支持幂等、429 等待和结果不确定时只读核对。

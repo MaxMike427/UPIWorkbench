@@ -96,6 +96,37 @@ def test_provider_selection_rejects_unintegrated_automatic_pair(client):
     assert "组合未接入" in start.json()["detail"]
 
 
+def test_ytc_builtin_proxy_does_not_require_local_proxy_pool(client, monkeypatch):
+    headers = login(client)
+    from app.api import upi_router
+
+    async def fake_settings(db):
+        return {
+            "provider": "ytc", "extract_provider": "ytc", "payment_provider": "ytc",
+            "base_url": "https://ytc.example", "payment_base_url": "https://masi.example",
+            "payment_cdk": "", "key": "ohk_test", "ytc_proxy_source": "provider",
+        }
+
+    monkeypatch.setattr(upi_router, "_provider_settings", fake_settings)
+    # The helper itself is the regression boundary: built-in mode returns no
+    # caller-supplied proxies instead of rejecting an empty local pool.
+    import asyncio
+    async def read():
+        import aiosqlite
+        async with aiosqlite.connect(client._v120_db_path) as db:
+            return await upi_router._ytc_proxies(db, "ytc", "provider")
+    assert asyncio.run(read()) == []
+
+
+@pytest.mark.asyncio
+async def test_ytc_auto_proxy_uses_local_pool_when_enabled():
+    from app.services.batch_service import _uses_external_ytc_proxy
+    assert _uses_external_ytc_proxy({"extract_provider": "ytc", "ytc_proxy_source": "auto",
+                                     "proxy_enabled": True, "proxies": ["http://proxy.example:80"]})
+    assert not _uses_external_ytc_proxy({"extract_provider": "ytc", "ytc_proxy_source": "auto",
+                                         "proxy_enabled": False, "proxies": []})
+
+
 @pytest.mark.asyncio
 async def test_local_provider_passes_account_email_and_proxy_to_protocol():
     from app.services.upi_providers import LocalUPIProvider

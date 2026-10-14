@@ -37,6 +37,7 @@ async def _provider_settings(db) -> dict:
                     or await _cfg(db, "upi_provider.base_url", "https://ytc.xxsyun.xyz"),
         "payment_base_url": await _cfg(db, "payment_provider.base_url", "https://masi.cc.cd"),
         "payment_cdk": await _cfg(db, "payment_provider.cdk", ""),
+        "ytc_proxy_source": await _cfg(db, "ytc.proxy_source", "auto"),
         "key": await _cfg(db, "extract_provider.cdk", "")
                or await _cfg(db, "upi_provider.cdk", "")
                or await _cfg(db, "upi_provider.api_key", ""),
@@ -51,15 +52,18 @@ def _public(task: dict) -> dict:
     return t
 
 
-async def _ytc_proxies(db,provider):
+async def _ytc_proxies(db,provider,proxy_source='auto'):
     if provider=='local':
         if await _cfg(db,'proxy.enabled')!='true':
             return []
         async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:
             return [r['url'] async for r in cur]
     if provider!='ytc':return None
+    if proxy_source=='provider':return []
     async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
-    if await _cfg(db,'proxy.enabled')!='true' or not proxies:
+    if proxy_source=='auto' and (await _cfg(db,'proxy.enabled')!='true' or not proxies):
+        return []
+    if proxy_source=='provided' and (await _cfg(db,'proxy.enabled')!='true' or not proxies):
         raise HTTPException(status_code=400,detail='新提链需要开启代理库并保存有效代理')
     if any(proxy.split('://',1)[0].lower() not in ('http','https','socks5') for proxy in proxies):
         raise HTTPException(status_code=400,detail='任务代理包含 ytc 不支持的协议，仅支持 HTTP/HTTPS/SOCKS5')
@@ -78,7 +82,7 @@ async def create(body: UPICreateRequest, request: Request,
         raise HTTPException(status_code=400, detail="请提供 credential_ids 或有效的 status 筛选")
     settings = await _provider_settings(db)
     provider = settings["provider"]
-    proxies=await _ytc_proxies(db,provider)
+    proxies=await _ytc_proxies(db,provider,settings.get('ytc_proxy_source','auto'))
     ytc_base = settings["base_url"]
     ytc_key = settings["key"]
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
@@ -135,7 +139,7 @@ async def retry(task_id: int, request: Request,
                 admin: dict = Depends(get_current_admin), db=Depends(get_db)):
     settings = await _provider_settings(db)
     provider = settings["provider"]
-    proxies=await _ytc_proxies(db,provider)
+    proxies=await _ytc_proxies(db,provider,settings.get('ytc_proxy_source','auto'))
     ytc_base = settings["base_url"]
     ytc_key = settings["key"]
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")

@@ -107,6 +107,7 @@ class BatchOut(BaseModel):
     extract_provider: str = "ytc"
     payment_provider: str = "ytc"
     sms_provider: str = "handy"
+    ytc_proxy_source: str = "auto"
 
 
 class ProxyUpdate(BaseModel):
