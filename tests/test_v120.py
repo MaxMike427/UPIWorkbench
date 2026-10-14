@@ -96,6 +96,32 @@ def test_provider_selection_rejects_unintegrated_automatic_pair(client):
     assert "组合未接入" in start.json()["detail"]
 
 
+def test_legacy_batch_listing_defaults_new_snapshot_fields_to_strings(client):
+    headers = login(client)
+    import sqlite3
+
+    connection = sqlite3.connect(client._v120_db_path)
+    connection.execute(
+        "INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,snapshot_json) "
+        "VALUES(?,?,?,?,?,?)",
+        ("legacy", 0, "created", "created", "{}", '{"sms_enabled":true}'),
+    )
+    connection.commit()
+    batch_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.close()
+
+    listing = client.get("/api/batches", headers=headers)
+    assert listing.status_code == 200, listing.text
+    item = next(row for row in listing.json()["items"] if row["id"] == batch_id)
+    assert item["extract_provider"] == "ytc"
+    assert item["payment_provider"] == "ytc"
+    assert item["sms_provider"] == "handy"
+    assert item["ytc_proxy_source"] == "provided"
+
+    detail = client.get(f"/api/batches/{batch_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+
+
 def test_ytc_builtin_proxy_does_not_require_local_proxy_pool(client, monkeypatch):
     headers = login(client)
     from app.api import upi_router

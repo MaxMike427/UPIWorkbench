@@ -66,7 +66,10 @@ async def list_batches(page: int = Query(default=1, ge=1),
         r["members"] = []
         r["report_available"] = bool(r.pop("report_path",None))
         snapshot=json.loads(r.pop('snapshot_json') or '{}')
-        r.update({key:snapshot.get(key,key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider','ytc_proxy_source')})
+        defaults={'sms_enabled':True,'proxy_enabled':False,'integration_enabled':False,
+                  'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc',
+                  'sms_provider':'handy','ytc_proxy_source':'provided'}
+        r.update({key:snapshot.get(key,defaults[key]) for key in defaults})
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 

@@ -439,6 +439,9 @@ class BatchService:
             result=dict(row)
             result['members']=[{k:v for k,v in m.items() if k not in ('at_snapshot','proxy_url')} for m in await self._members(db,batch_id)]
             snapshot=json.loads(result.pop('snapshot_json',None) or '{}')
-            result.update({key:snapshot.get(key, key=='sms_enabled') for key in ('sms_enabled','proxy_enabled','integration_enabled','auto_push','extract_provider','payment_provider','sms_provider','ytc_proxy_source')})
+            defaults={'sms_enabled':True,'proxy_enabled':False,'integration_enabled':False,
+                      'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc',
+                      'sms_provider':'handy','ytc_proxy_source':'provided'}
+            result.update({key:snapshot.get(key,defaults[key]) for key in defaults})
             return result
         finally:await db.close()
