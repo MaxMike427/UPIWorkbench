@@ -7,8 +7,11 @@ import asyncio
 from contextlib import suppress
 
 import aiosqlite
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api import auth_router, batch_router, config_router, credential_router, dashboard_router, qualification_router, sms_router, upi_router, success_router, provider_router
@@ -53,6 +56,12 @@ async def lifespan(app: FastAPI):
 def create_app() -> FastAPI:
     s = get_settings()
     app = FastAPI(title=s.title, version=VERSION, lifespan=lifespan)
+    @app.exception_handler(RequestValidationError)
+    async def sensitive_config_validation(request: Request, error: RequestValidationError):
+        # Pydantic 默认错误附带 input；新配置包含 API URL 和密钥，不能回显。
+        if request.url.path in ('/api/configs/supplier','/api/proxies/dynamic'):
+            return JSONResponse(status_code=422,content={'detail':'配置参数无效，请检查选项、类型和长度'})
+        return await request_validation_exception_handler(request,error)
     app.add_middleware(
         CORSMiddleware,
         allow_origins=["*"],

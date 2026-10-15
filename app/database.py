@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS account_exports (
 );
 CREATE INDEX IF NOT EXISTS idx_exports_credential ON account_exports(credential_id,format);
 CREATE INDEX IF NOT EXISTS idx_credentials_status ON credentials(status);
+CREATE INDEX IF NOT EXISTS idx_credentials_source ON credentials(source_file);
 CREATE INDEX IF NOT EXISTS idx_sms_tasks_credential ON sms_tasks(credential_id);
 CREATE INDEX IF NOT EXISTS idx_upi_tasks_credential ON upi_tasks(credential_id);
 CREATE INDEX IF NOT EXISTS idx_batches_status ON task_batches(status);
@@ -156,6 +157,8 @@ _MIGRATIONS = [
     ("batch_members", "upi_task_id", "ALTER TABLE batch_members ADD COLUMN upi_task_id INTEGER REFERENCES upi_tasks(id)"),
     ("batch_members", "sms_task_id", "ALTER TABLE batch_members ADD COLUMN sms_task_id INTEGER REFERENCES sms_tasks(id)"),
     ("upi_tasks", "external_job_id", "ALTER TABLE upi_tasks ADD COLUMN external_job_id TEXT"),
+    ("upi_tasks", "external_job_secret", "ALTER TABLE upi_tasks ADD COLUMN external_job_secret TEXT"),
+    ("upi_tasks", "payment_order_id", "ALTER TABLE upi_tasks ADD COLUMN payment_order_id TEXT"),
     ("task_batches", "deleted_at", "ALTER TABLE task_batches ADD COLUMN deleted_at TEXT"),
     ("task_batches", "snapshot_json", "ALTER TABLE task_batches ADD COLUMN snapshot_json TEXT"),
     ("integration_pushes", "next_attempt_at", "ALTER TABLE integration_pushes ADD COLUMN next_attempt_at REAL DEFAULT 0"),
@@ -165,6 +168,9 @@ _MIGRATIONS = [
 
 DEFAULT_CONFIGS = [
     ("proxy.enabled", "false", "启用代理库"),
+    ("proxy.dynamic.api_url", "", "711proxy API 提取 URL（敏感）"),
+    ("proxy.dynamic.protocol", "http", "711proxy 返回代理协议"),
+    ("proxy.dynamic.enabled", "false", "新任务启动前自动取动态代理"),
     ("sms.enabled", "true", "启用接码"),
     ("sub2api.enabled", "false", "启用 sub2api 推送"),
     ("sub2api.base_url", "", "sub2api 实例 URL"),

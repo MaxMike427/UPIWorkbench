@@ -3,8 +3,9 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 
 from ..auth import get_current_admin
 from ..database import get_db, log_action
-from ..models import DynamicRequest, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
+from ..models import DynamicRequest, DynamicProxyConfig, ProxyIdsRequest, ProxyImportRequest, ProxyUpdate, ToggleRequest
 from ..services.proxy_service import append_proxies, delete_proxies, get_proxies, save_proxies, set_dynamic, test_proxies, test_proxy
+from ..services.proxy_service import get_dynamic_config, save_dynamic_config, fetch_and_append_dynamic
 
 router=APIRouter(prefix='/api/proxies',tags=['proxies'])
 
@@ -27,6 +28,27 @@ async def add_proxies(body:ProxyImportRequest,request:Request,admin:dict=Depends
     try:result=await append_proxies(db,body.text,body.enabled,body.is_dynamic)
     except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
     await log_action(db,admin['id'],'proxy_add','proxies',None,f"count={result['total']},dynamic={body.is_dynamic}",request.client.host if request.client else '')
+    return result
+
+
+@router.get('/dynamic')
+async def dynamic_config(admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    return await get_dynamic_config(db)
+
+
+@router.put('/dynamic')
+async def update_dynamic_config(body:DynamicProxyConfig,request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    try:result=await save_dynamic_config(db,body)
+    except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
+    await log_action(db,admin['id'],'dynamic_proxy_config','config',None,'711proxy configuration saved',request.client.host if request.client else '')
+    return result
+
+
+@router.post('/dynamic/fetch')
+async def fetch_dynamic(request:Request,admin:dict=Depends(get_current_admin),db=Depends(get_db)):
+    try:result=await fetch_and_append_dynamic(db)
+    except ValueError as e:raise HTTPException(status_code=400,detail=str(e))
+    await log_action(db,admin['id'],'dynamic_proxy_fetch','proxies',None,f"fetched={result['fetched']}",request.client.host if request.client else '')
     return result
 
 

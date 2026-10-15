@@ -7,7 +7,7 @@ import tempfile
 import time
 import urllib.request
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 ROOT=Path(__file__).parents[1]
 ARTIFACTS=Path(tempfile.mkdtemp(prefix='upi-browser-',dir='/tmp/opencode'))
@@ -21,7 +21,8 @@ server=subprocess.Popen([str(ROOT/'.venv/bin/python'),'-m','tests.browser_fixtur
 try:
     for _ in range(50):
         try:
-            urllib.request.urlopen(BASE+'/api/health',timeout=1)
+            with urllib.request.urlopen(BASE+'/api/health',timeout=1) as health:
+                assert json.loads(health.read())['version']=='1.3.0'
             break
         except Exception:time.sleep(0.2)
     else:raise RuntimeError('测试服务未启动')
@@ -41,29 +42,49 @@ try:
         page.get_by_role('button',name='设置',exact=True).click()
         def check_link(scope,label,url):
             link=scope.get_by_role('link',name=label,exact=True)
-            assert link.is_visible()
+            expect(link).to_be_visible()
             assert link.get_attribute('href')==url
             assert link.get_attribute('target')=='_blank'
             assert link.get_attribute('rel')=='noopener noreferrer'
-        sms_form=page.locator('form').filter(has=page.get_by_label('接码 CDK',exact=True))
-        extract_form=page.locator('form').filter(has=page.get_by_label('提炼 CDK',exact=True))
-        payment_form=page.locator('form').filter(has=page.get_by_label('支付 CDK',exact=True))
-        check_link(sms_form,'去购买','https://wzyp.cn/shop/8Q9RHH0W')
-        check_link(sms_form,'CDK 融合','https://apihub.space/handy/')
-        check_link(extract_form,'去购买','https://wzyp.cn/shop/Camellia')
-        check_link(payment_form,'去购买','https://wzyp.cn/shop/Camellia')
-        assert sms_form.get_by_role('link',name='提交 CDK',exact=True).count()==0
-        assert extract_form.get_by_role('link',name='CDK 融合',exact=True).count()==0
-        assert payment_form.get_by_role('link',name='CDK 融合',exact=True).count()==0
-        page.get_by_label('接码 CDK',exact=True).fill('TEST-SMS-CDK')
-        sms_form.get_by_role('button',name='保存',exact=True).click()
-        page.wait_for_function('Alpine.$data(document.body).busy===false')
-        page.get_by_label('提炼 CDK',exact=True).fill('extract-test-cdk')
-        extract_form.get_by_role('button',name='保存',exact=True).click()
-        page.wait_for_function('Alpine.$data(document.body).busy===false')
-        page.get_by_label('支付 CDK',exact=True).fill('payment-test-cdk')
-        payment_form.get_by_role('button',name='保存',exact=True).click()
-        page.wait_for_function('Alpine.$data(document.body).busy===false')
+        supplier=page.locator('#supplier-config')
+        page.get_by_role('button',name='配置供应商',exact=True).click()
+        assert not page.get_by_label('提链供应商',exact=True).is_visible()
+        page.get_by_label('1. 提链类型',exact=True).select_option('extract_pay')
+        page.get_by_label('提链供应商',exact=True).select_option('ytc')
+        assert not page.get_by_label('4. 是否接码',exact=True).is_visible()
+        page.get_by_label('2. 代理选择',exact=True).select_option('provider')
+        assert not page.get_by_label('3. 支付供应商',exact=True).is_visible()
+        page.get_by_label('4. 是否接码',exact=True).select_option('yes')
+        page.get_by_label('接码供应商',exact=True).select_option('handy')
+        page.get_by_label('ytc API Key（ohk_）',exact=True).fill('ohk_browser-test')
+        page.get_by_label('Handy 融合接码 CDK',exact=True).fill('TEST-SMS-CDK')
+        supplier.get_by_role('button',name='查看配置清单',exact=True).click()
+        supplier.get_by_role('button',name='上一步',exact=True).click()
+        assert page.get_by_label('ytc API Key（ohk_）',exact=True).input_value()=='ohk_browser-test'
+        supplier.get_by_role('button',name='查看配置清单',exact=True).click()
+        supplier.get_by_role('button',name='确认保存',exact=True).click()
+        page.get_by_text('供应商配置已保存',exact=True).wait_for()
+        supplier.get_by_text('ytc 内置代理 · 提链+支付 · Handy 接码',exact=True).wait_for()
+        check_link(supplier,'ytc CDK 购买','https://wzyp.cn/shop/Camellia')
+        check_link(supplier,'Handy CDK 购买','https://wzyp.cn/shop/8Q9RHH0W')
+        check_link(supplier,'ytc CDK 兑换 / 供应商网站','https://ytc.xxsyun.xyz/')
+        check_link(supplier,'Handy CDK 兑换 / 供应商网站','https://apihub.space/handy/')
+        assert not supplier.get_by_text('ohk_browser-test',exact=False).count()
+        page.get_by_role('button',name='修改配置',exact=True).click()
+        page.get_by_label('1. 提链类型',exact=True).select_option('extract')
+        page.get_by_label('提链供应商',exact=True).select_option('lumen')
+        page.get_by_label('2. 代理选择',exact=True).select_option('system')
+        expect(page.get_by_label('3. 支付供应商',exact=True)).to_be_visible()
+        page.get_by_label('3. 支付供应商',exact=True).select_option('masi')
+        page.get_by_label('4. 是否接码',exact=True).select_option('no')
+        assert not page.get_by_label('接码供应商',exact=True).is_visible()
+        supplier.get_by_role('button',name='取消配置',exact=True).click()
+        supplier.get_by_text('ytc 内置代理 · 提链+支付 · Handy 接码',exact=True).wait_for()
+        for width in (320,768,1024,1440):
+            page.set_viewport_size({'width':width,'height':900})
+            assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'),f'设置页在 {width}px 溢出'
+        page.set_viewport_size({'width':1440,'height':1000})
+        page.screenshot(path=str(ARTIFACTS/'supplier.png'),full_page=True)
         page.get_by_label('并发数',exact=True).fill('2')
         page.get_by_role('button',name='保存并发数',exact=True).click()
         page.get_by_text('并发数已保存，下次任务开始或继续时生效',exact=True).wait_for()
@@ -122,13 +143,30 @@ try:
         page.get_by_text('http://134.209.144.59:80',exact=True).wait_for()
         page.get_by_label('启用代理库',exact=True).check()
         page.get_by_text('代理库已启用',exact=True).wait_for()
+        page.get_by_label('711proxy API URL',exact=True).fill('https://api.711proxy.com/gen?token=browser-private')
+        page.get_by_label('系统代理新任务启动前自动取链',exact=True).check()
+        page.get_by_role('button',name='保存动态代理配置',exact=True).click()
+        page.get_by_text('动态代理配置已保存，尚未调用取链接口',exact=True).wait_for()
+        assert page.get_by_label('711proxy API URL',exact=True).input_value()==''
+        page.once('dialog',lambda dialog:dialog.accept())
+        page.get_by_role('button',name='拉取并添加',exact=True).click()
+        page.get_by_text('已拉取 1 个动态代理并添加到代理库',exact=True).wait_for()
+        page.get_by_text('http://203.0.113.71:10000',exact=True).wait_for()
+        page.screenshot(path=str(ARTIFACTS/'dynamic-proxy.png'),full_page=True)
         page.get_by_role('button',name='账号库',exact=True).click()
-        check_link(page,'去购买 · 0217','https://wzyp.cn/shop/CPZF8PBK')
-        check_link(page,'去购买 · AI 批发商','https://wzyp.cn/shop/8UOIIRW2')
+        check_link(page,'去购买','https://wzyp.cn/shop/CPZF8PBK')
+        assert not page.get_by_role('link',name='去购买 · 0217',exact=True).count()
+        assert not page.get_by_role('link',name='去购买 · AI 批发商',exact=True).count()
         page.get_by_label('账号库每页数量',exact=True).select_option('50')
         page.wait_for_function('Alpine.$data(document.body).credPageSize===50')
-        page.get_by_label('选择账号 TXT 文件',exact=True).set_input_files({'name':'test.txt','mimeType':'text/plain','buffer':b'alice@example.com---password---TOTP---eyJoriginal\nbob@example.com---password---TOTP---eyJoriginal2\nexcluded@example.com---password---TOTP---eyJoriginal3'})
+        page.get_by_label('选择账号 TXT 文件',exact=True).set_input_files({'name':'test.txt','mimeType':'text/plain','buffer':b'alice@example.com---password---TOTP---eyJoriginal\nbob@example.com---password---TOTP---eyJoriginal2'})
         page.get_by_text('alice@example.com',exact=True).wait_for()
+        page.get_by_label('选择账号 TXT 文件',exact=True).set_input_files({'name':'other.txt','mimeType':'text/plain','buffer':b'excluded@example.com---password---TOTP---eyJoriginal3'})
+        page.get_by_text('excluded@example.com',exact=True).wait_for()
+        page.get_by_label('按来源文件筛选',exact=True).select_option('test.txt')
+        page.wait_for_function('Alpine.$data(document.body).creds.length===2')
+        assert not page.locator("section[x-show=\"tab==='credentials'\"]").get_by_text('excluded@example.com',exact=True).count()
+        page.screenshot(path=str(ARTIFACTS/'source-filter.png'),full_page=True)
         page.get_by_label('选择账号 alice@example.com',exact=True).check()
         page.get_by_label('选择账号 bob@example.com',exact=True).check()
         page.get_by_role('button',name='用选中账号创建任务',exact=True).click()
@@ -180,9 +218,18 @@ try:
         page.locator("section[x-show=\"tab==='successes'\"]").get_by_text('alice@example.com',exact=True).wait_for()
         # 关闭接码，新任务无需调用短信接口，结果仍入成功库但不能下载 JSON。
         page.get_by_role('button',name='设置',exact=True).click()
-        sms_form.get_by_label('启用接码',exact=False).uncheck()
-        page.get_by_text('接码开关已保存，仅影响新任务',exact=True).wait_for()
+        page.get_by_role('button',name='修改配置',exact=True).click()
+        page.get_by_label('1. 提链类型',exact=True).select_option('extract_pay')
+        page.get_by_label('提链供应商',exact=True).select_option('ytc')
+        page.get_by_label('2. 代理选择',exact=True).select_option('system')
+        page.get_by_label('4. 是否接码',exact=True).select_option('no')
+        supplier.get_by_role('button',name='查看配置清单',exact=True).click()
+        supplier.get_by_role('button',name='确认保存',exact=True).click()
+        page.wait_for_function('Alpine.$data(document.body).supplierStep===0')
+        supplier.get_by_text('ytc 系统代理 · 提链+支付 · 不接码',exact=True).wait_for()
         page.get_by_role('button',name='账号库',exact=True).click()
+        page.get_by_label('按来源文件筛选',exact=True).select_option('other.txt')
+        page.get_by_text('excluded@example.com',exact=True).wait_for()
         page.get_by_label('选择账号 excluded@example.com',exact=True).check()
         page.get_by_role('button',name='用选中账号创建任务',exact=True).click()
         wizard.get_by_role('button',name='下一步',exact=True).click()
@@ -199,6 +246,8 @@ try:
         page.get_by_role('button',name='删除任务',exact=True).click()
         page.get_by_text('任务已删除',exact=True).first.wait_for()
         page.get_by_role('button',name='账号库',exact=True).click()
+        page.get_by_label('按来源文件筛选',exact=True).select_option('__all__')
+        page.wait_for_function('Alpine.$data(document.body).creds.length===3')
         page.get_by_label('选择本页全部账号').check()
         page.once('dialog',lambda dialog:dialog.accept())
         page.get_by_role('button',name='删除选中',exact=True).click()
@@ -211,7 +260,7 @@ try:
             assert page.evaluate('document.documentElement.scrollWidth <= window.innerWidth'),f'页面在 {width}px 溢出'
         assert not errors,errors
         browser.close()
-        print(json.dumps({'result':'PASS','modules':7,'selection':'2 of 3 accounts; deselect removes candidate','integration':'template saved; 2 mock pushes succeeded','sms_off':'success library TXT only','screens':4,'external_links':6,'concurrency_saved':2,'account_page_size':50,'downloads':['TXT','MD','CPA+sub2api ZIP'],'artifacts':str(ARTIFACTS)},ensure_ascii=False))
+        print(json.dumps({'result':'PASS','version':'1.3.0','modules':7,'supplier_wizard':'progressive; integrated skip; cancel; back; save; secrets hidden','dynamic_proxy':'saved without fetch; manual fetch; auto before new system task','source_filter':'2 files; exact grouping','selection':'2 of 3 accounts; deselect removes candidate','integration':'template saved; 2 mock pushes succeeded','sms_off':'success library TXT only','screens':4,'concurrency_saved':2,'account_page_size':50,'downloads':['TXT','MD','CPA+sub2api ZIP'],'artifacts':str(ARTIFACTS)},ensure_ascii=False))
 finally:
     server.terminate()
     try:server.wait(timeout=10)

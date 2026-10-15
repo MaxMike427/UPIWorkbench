@@ -28,11 +28,18 @@ async def import_txt(request: Request, file: UploadFile = File(...),
 @router.get("", response_model=PageOut[CredentialOut])
 async def list_creds(status: str | None = Query(default=None),
                      keyword: str | None = Query(default=None),
+                     source_file: str | None = Query(default=None),
                      page: int = Query(default=1, ge=1),
                      page_size: int = Query(default=20, ge=1, le=200),
                      admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    items, total = await credential_service.list_credentials(db, status, keyword, page, page_size)
+    items, total = await credential_service.list_credentials(db, status, keyword, page, page_size, source_file)
     return {"items": items, "total": total, "page": page, "page_size": page_size}
+
+
+@router.get("/sources")
+async def list_sources(admin: dict = Depends(get_current_admin), db=Depends(get_db)):
+    items = await credential_service.list_sources(db)
+    return {"items": items, "total": len(items)}
 
 
 @router.get("/export", response_class=PlainTextResponse)

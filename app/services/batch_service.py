@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import weakref
 from datetime import datetime
 
 import aiosqlite
@@ -12,13 +13,16 @@ from ..database import log_runtime
 from ..config import parse_concurrency
 from ..utils.helpers import utcnow_iso
 from .proxy_service import session_variant
+from . import proxy_service
 from .qualification_service import QualificationService
 from .sms_service import SMSService
 from .upi_service import UPIService
 from .upi_providers import select_ytc_api_key
+from .provider_config_service import config_values, provider_api_key, provider_credential
 from .report_service import safe_error, write_task_report
 
 _RUNNING: dict[tuple[str,int], asyncio.Task] = {}
+_VALIDATING = weakref.WeakValueDictionary()
 
 
 def _uses_external_ytc_proxy(snapshot: dict) -> bool:
@@ -123,9 +127,16 @@ class BatchService:
              'ytc_proxy_source':ytc_proxy_source,
              'ytc_base_url':await cfg('extract_provider.base_url') or await cfg('upi_provider.base_url','https://ytc.xxsyun.xyz'),
              'ytc_api_key':select_ytc_api_key(extract_cdk, payment_cdk, legacy_cdk),
+             'payment_api_key':provider_api_key(await config_values(db), payment_provider),
              'payment_base_url':payment_base_url,
-             'payment_cdk':payment_cdk,
+             'payment_cdk':provider_credential(await config_values(db), payment_provider) if payment_provider=='xxsyun_upi' else payment_cdk,
              'wait_for_payment':True,'max_retries':5,'retry_interval':120.0,'concurrency':concurrency}
+        values=await config_values(db)
+        if 'supplier.flow_type' in values:
+            upi['ytc_api_key']=provider_credential(values,extract_provider)
+            upi['payment_cdk']=provider_credential(values,payment_provider)
+            upi['payment_api_key']=provider_api_key(values,payment_provider)
+            sms['cdk']=provider_credential(values,sms_provider)
         return cls(db_path,qual,sms,upi,concurrency=concurrency)
 
     async def _connect(self):
@@ -156,9 +167,10 @@ class BatchService:
         finally:await db.close()
 
     @staticmethod
-    async def _session_proxies(db,ids)->dict:
+    async def _session_proxies(db,ids,rows=None)->dict:
         """网关型代理按账号分配独立粘性会话，保证同一账号全程固定出口 IP。"""
-        async with db.execute('SELECT url,is_dynamic FROM proxies ORDER BY id') as cur:rows=[dict(r) async for r in cur]
+        if rows is None:
+            async with db.execute('SELECT url,is_dynamic FROM proxies ORDER BY id') as cur:rows=[dict(r) async for r in cur]
         if not rows:return {}
         gateways=[r['url'] for r in rows if r['is_dynamic'] and '@' in r['url']]
         fixed=[r['url'] for r in rows if r['url'] not in gateways]
@@ -181,12 +193,39 @@ class BatchService:
         payment_provider=config.get('payment_provider.provider') or extract_provider
         if extract_provider==legacy_provider and legacy_provider not in ('', 'ytc') and payment_provider=='ytc':
             payment_provider=extract_provider
-        return {'sms_enabled':config.get('sms.enabled','true')=='true','proxy_enabled':config.get('proxy.enabled','false')=='true',
+        snapshot={'sms_enabled':config.get('sms.enabled','true')=='true','proxy_enabled':config.get('proxy.enabled','false')=='true',
                 'proxies':proxies,'integration_enabled':config.get('sub2api.enabled','false')=='true',
                 'integration_url':config.get('sub2api.base_url',''),'integration_template':json.loads(config.get('sub2api.template') or '{}'),
                 'auto_push':bool(auto_push),'extract_provider':extract_provider,
                 'payment_provider':payment_provider,'sms_provider':config.get('sms_provider.provider','handy'),
                 'ytc_proxy_source':config.get('ytc.proxy_source','auto')}
+        if 'supplier.flow_type' in config:
+            snapshot['supplier_config']=True
+            snapshot['flow_type']=config['supplier.flow_type']
+            snapshot['proxy_source']=config['supplier.proxy_source']
+            snapshot['provider_urls']={key:config.get(key+'.base_url','') for key in ('extract_provider','payment_provider','sms_provider')}
+        if snapshot['ytc_proxy_source']!='provider':
+            dynamic=await proxy_service.dynamic_config_values(db)
+            if dynamic['enabled'] and dynamic['api_url']:
+                snapshot['dynamic_proxy']=dynamic
+                snapshot['dynamic_proxy_fetched']=False
+        return snapshot
+
+    async def _apply_supplier_snapshot(self,db,snapshot):
+        values=await config_values(db)
+        if not snapshot.get('supplier_config') and 'supplier.flow_type' not in values:return
+        if not snapshot.get('extract_provider') or not snapshot.get('payment_provider'):return
+        extract=snapshot['extract_provider'];payment=snapshot['payment_provider'];sms=snapshot.get('sms_provider','')
+        urls=snapshot.get('provider_urls',{})
+        if not urls:
+            from .provider_catalog import get_provider
+            urls={key:(get_provider(pid) or {}).get('url','').rstrip('/') for key,pid in
+                  (('extract_provider',extract),('payment_provider',payment),('sms_provider',sms))}
+        self.upi.update(provider=extract,extract_provider=extract,payment_provider=payment,
+                        ytc_proxy_source=snapshot.get('ytc_proxy_source','provided'),ytc_base_url=urls.get('extract_provider',''),
+                        payment_base_url=urls.get('payment_provider',''),ytc_api_key=provider_credential(values,extract),
+                        payment_cdk=provider_credential(values,payment),payment_api_key=provider_api_key(values,payment))
+        self.sms.update(provider=sms,base_url=urls.get('sms_provider',''),cdk=provider_credential(values,sms))
 
     @staticmethod
     def _legacy_snapshot():
@@ -196,26 +235,42 @@ class BatchService:
                 'integration_template':{},'auto_push':True,'extract_provider':'ytc','payment_provider':'ytc','sms_provider':'handy','ytc_proxy_source':'provided'}
 
     async def validate_start(self,db,bid):
+        key=(self.db_path,bid)
+        lock=_VALIDATING.get(key)
+        if lock is None:
+            lock=asyncio.Lock();_VALIDATING[key]=lock
+        async with lock:
+            await self._validate_start(db,bid)
+
+    async def _validate_start(self,db,bid):
         async with db.execute('SELECT * FROM task_batches WHERE id=? AND deleted_at IS NULL',(bid,)) as cur:batch=await cur.fetchone()
         if not batch:raise ValueError('任务不存在')
         snapshot=json.loads(batch['snapshot_json'] or '{}')
+        await self._apply_supplier_snapshot(db,snapshot)
+        if snapshot.get('supplier_config') and not (
+                (snapshot['extract_provider']=='ytc' and snapshot['payment_provider'] in ('ytc','xxsyun_upi')) or
+                snapshot['extract_provider']=='wangyou' or
+                (snapshot['extract_provider']=='local' and snapshot['payment_provider'] in ('masi','xxsyun_upi'))):
+            raise ValueError('此供应商配置为占位，暂未开放自动任务；请选择已接入提炼和支付组合')
+        if snapshot.get('supplier_config') and snapshot.get('sms_enabled') and snapshot.get('sms_provider')!='handy':
+            raise ValueError('此供应商配置为占位，暂未开放自动任务；请选择 ytc 和 Handy 或关闭接码')
         extract_provider=snapshot.get('extract_provider','ytc')
         payment_provider=snapshot.get('payment_provider',extract_provider)
         supported_integrated={'ytc','nerver'}
-        if extract_provider not in ('ytc','nerver','local') and payment_provider != extract_provider:
+        if extract_provider not in ('ytc','nerver','local') and not (extract_provider in ('ytc','local') and payment_provider=='xxsyun_upi') and payment_provider != extract_provider:
             raise ValueError('提炼和支付服务商组合未接入，请选择同一提炼支付一体服务商')
-        if payment_provider != extract_provider and payment_provider!='masi':
+        if payment_provider != extract_provider and not (extract_provider in ('ytc','local') and payment_provider=='xxsyun_upi') and payment_provider!='masi':
             raise ValueError('提炼和支付服务商组合未接入，请选择同一提炼支付一体服务商')
         if extract_provider not in ('ytc','nerver','local'):
             raise ValueError('当前提炼服务商尚未接入自动任务，请选择 ytc、Nerver 或本地提炼')
-        if extract_provider=='local' and payment_provider not in ('masi',):
-            raise ValueError('本地提炼目前仅接入 Masi 支付服务商')
-        if payment_provider not in supported_integrated and payment_provider!='masi':
+        if extract_provider=='local' and payment_provider not in ('masi','xxsyun_upi'):
+            raise ValueError('本地提炼目前仅接入 Masi 或 UPI 雇主中心支付服务商')
+        if payment_provider not in supported_integrated and payment_provider not in ('masi','xxsyun_upi'):
             raise ValueError('当前支付服务商暂未接入自动任务，请选择 ytc、Nerver 或 Masi')
-        if payment_provider not in supported_integrated:
+        if payment_provider not in supported_integrated and not (extract_provider in ('ytc','local') and payment_provider=='xxsyun_upi'):
             raise ValueError('当前支付服务商暂未接入自动任务，请选择已接入的提炼支付服务商')
         allowed_proxy_schemes=('http','https','socks5','socks5h') if extract_provider=='local' else ('http','https','socks5')
-        if any(str(proxy).split('://',1)[0].lower() not in allowed_proxy_schemes for proxy in snapshot.get('proxies',[])):
+        if snapshot.get('ytc_proxy_source')!='provider' and snapshot.get('proxy_enabled') and any(str(proxy).split('://',1)[0].lower() not in allowed_proxy_schemes for proxy in snapshot.get('proxies',[])):
             raise ValueError('任务代理协议不受当前服务商支持，仅支持 HTTP/HTTPS/SOCKS5；本地提炼另支持 SOCKS5H')
         if snapshot.get('sms_enabled',True) and not self.sms.get('cdk'):raise ValueError('请先保存接码 CDK，或为新任务关闭接码')
         if snapshot.get('sms_enabled',True) and self.sms.get('provider','handy')!='handy':
@@ -223,11 +278,27 @@ class BatchService:
         async with db.execute("SELECT 1 FROM batch_members WHERE batch_id=? AND stage IN ('pending','qualified','upi_failed','qual_failed') LIMIT 1",(bid,)) as cur:requires_payment=await cur.fetchone()
         if requires_payment and self.upi.get('provider')=='ytc' and not self.upi.get('ytc_api_key'):
             raise ValueError('请先保存支付服务商 CDK')
+        if requires_payment and self.upi.get('payment_provider')=='xxsyun_upi' and not self.upi.get('payment_api_key'):
+            raise ValueError('请先保存 ytc ohk_ API Key 作为 UPI 雇主支付 API Key')
         if requires_payment and self.upi.get('payment_provider')=='masi' and not self.upi.get('payment_cdk'):
             raise ValueError('请先保存 Masi 支付 CDK')
         async with db.execute("SELECT m.credential_id FROM batch_members m WHERE m.batch_id=? AND m.stage IN ('pending','qualified','upi_failed','qual_failed')"
                               " AND NOT EXISTS(SELECT 1 FROM upi_tasks u WHERE u.credential_id=m.credential_id AND u.status='processing' AND u.external_job_id IS NOT NULL)",(bid,)) as cur:
             requires_proxy=await cur.fetchone()
+        dynamic=snapshot.get('dynamic_proxy')
+        if dynamic and not snapshot.get('dynamic_proxy_fetched') and requires_proxy:
+            async with db.execute("SELECT 1 FROM batch_members m JOIN upi_tasks u ON u.id=m.upi_task_id"
+                                  " WHERE m.batch_id=? AND u.external_job_id IS NOT NULL LIMIT 1",(bid,)) as cur:external=await cur.fetchone()
+            if external:raise ValueError('任务已有外部订单但缺少动态代理快照，请人工核对，不能自动更换代理')
+            items=await proxy_service.fetch_dynamic_proxies(dynamic)
+            if any(p['protocol'] not in allowed_proxy_schemes for p in items):raise ValueError('711proxy 返回代理协议不受当前供应商支持')
+            members=await self._members(db,bid)
+            assigned=await self._session_proxies(db,[m['credential_id'] for m in members],[{**p,'is_dynamic':True} for p in items])
+            snapshot.update(proxies=[p['url'] for p in items],proxy_enabled=True,dynamic_proxy_fetched=True)
+            for cid,url in assigned.items():
+                await db.execute('UPDATE batch_members SET proxy_url=? WHERE batch_id=? AND credential_id=?',(url,bid,cid))
+            await db.execute('UPDATE task_batches SET snapshot_json=? WHERE id=?',(json.dumps(snapshot),bid))
+            await db.commit()
         needs_external_proxy = snapshot.get('ytc_proxy_source','provided') == 'provided'
         if batch['workflow_version'] >= 3 and not snapshot.get('legacy') and requires_proxy and needs_external_proxy and (not snapshot.get('proxy_enabled') or not snapshot.get('proxies')):
             raise ValueError('新提链需要开启代理库并保存有效代理，请重新创建含代理快照的任务')
@@ -274,6 +345,7 @@ class BatchService:
             if not await self._alive(db,batch_id):return
             async with db.execute('SELECT * FROM task_batches WHERE id=?',(batch_id,)) as cur:batch=await cur.fetchone()
             snapshot=json.loads(batch['snapshot_json'] or '{}')
+            await self._apply_supplier_snapshot(db,snapshot)
             # 新建任务统一采用最新版流程；历史成功记录原样保留。
             for step,stages in [('qualification',{'pending'}),('upi',{'qualified'}),('sms',{'paid','binding'})]:
                 if not await self._alive(db,batch_id):return
@@ -343,6 +415,7 @@ class BatchService:
         elif step=='upi':
             snapshot=json.loads(batch['snapshot_json'] or '{}')
             options=dict(self.upi)
+            options['ytc_proxy_source']=snapshot.get('ytc_proxy_source',options.get('ytc_proxy_source','auto'))
             use_external_proxy = snapshot.get('ytc_proxy_source','provided') != 'provider' and snapshot.get('proxy_enabled') and snapshot.get('proxies')
             if use_external_proxy:
                 # 账号固定使用创建任务时分配的代理（含独立粘性会话），原订单恢复时不切换。

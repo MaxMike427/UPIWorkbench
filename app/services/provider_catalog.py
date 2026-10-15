@@ -37,18 +37,18 @@ PROVIDERS = [
     {"id": "ytc", "name": "ytc 提炼加支付（暗光提链）", "category": "extract_pay", "provider_type": "extract_pay",
      "url": "https://ytc.xxsyun.xyz/", "buy_url": "https://wzyp.cn/shop/Camellia",
      "cdk_key": "payment_provider.cdk", "integrated": True, "combined": True},
-    {"id": "xxsyun_upi", "name": "UPI 雇主中心", "category": "pay", "provider_type": "extract_pay",
+    {"id": "xxsyun_upi", "name": "UPI 雇主中心", "category": "pay", "provider_type": "pay",
      "url": "https://upi.xxsyun.xyz/", "buy_url": "https://upi.xxsyun.xyz/employer/tickets/",
-     "cdk_key": "payment_provider.cdk", "integrated": False, "combined": True},
+     "cdk_key": "payment_provider.cdk", "integrated": True, "combined": True},
     {"id": "seashore", "name": "Seashore 扫码站", "category": "pay", "provider_type": "pay",
      "url": "https://seashore.lol/publisher", "buy_url": "https://seashore.lol/publisher",
      "cdk_key": "payment_provider.cdk", "integrated": False, "combined": False},
     {"id": "masi", "name": "皮蛋扫码", "category": "pay", "provider_type": "pay",
      "url": "https://masi.cc.cd/extract", "buy_url": "https://wzyp.cn/shop/L8JH75L1",
      "cdk_key": "payment_provider.cdk", "integrated": False, "combined": False},
-    {"id": "wangyou", "name": "忘忧·公益 UPI 提链", "category": "extract_pay", "provider_type": "extract_pay",
+    {"id": "wangyou", "name": "春晴提链", "category": "extract_pay", "provider_type": "extract_pay",
      "url": "https://wangyou.dric52.com/", "buy_url": "https://wangyou.dric52.com/",
-     "cdk_key": "payment_provider.cdk", "integrated": False, "combined": True},
+      "cdk_key": "payment_provider.cdk", "integrated": True, "combined": True},
     {"id": "layo", "name": "Layo 提链工作台", "category": "extract_pay", "provider_type": "extract_pay",
      "url": "https://layo.club/", "buy_url": "https://layo.club/", "cdk_key": "payment_provider.cdk",
      "integrated": False, "combined": True, "note": "只支持 HTTP/HTTPS 代理"},
@@ -86,3 +86,8 @@ def get_provider(pid: str):
     if pid == "local_zero_link":
         pid = "local"
     return next((p for p in PROVIDERS if p["id"] == pid), None)
+
+
+def supports_provider_proxy(pid: str) -> bool:
+    # 只开放已有公开文档证据的内置代理，不推测占位供应商的能力。
+    return pid in ("ytc", "team_free_extract")

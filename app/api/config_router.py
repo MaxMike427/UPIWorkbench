@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from ..auth import get_current_admin
 from ..config import parse_concurrency
 from ..database import get_db, log_action
-from ..models import BatchConfigUpdate, ConfigItem, ConfigUpdate, IntegrationTemplate
+from ..models import BatchConfigUpdate, ConfigItem, ConfigUpdate, IntegrationTemplate, SupplierConfigUpdate
+from ..services.provider_config_service import get_supplier_config, save_supplier_config
 from ..utils.helpers import mask_secret
 
 router = APIRouter(prefix="/api/configs", tags=["configs"])
@@ -18,7 +19,12 @@ SENSITIVE_SUFFIX = (".cdk", ".key", ".api_key", ".admin_key", ".secret", ".passw
 
 
 def validate_config(key,value):
-    if key in ('sms.enabled','sub2api.enabled','proxy.enabled') and value not in ('true','false'):
+    if key=='proxy.dynamic.api_url' and value:
+        from ..services.proxy_service import validate_dynamic_url
+        return validate_dynamic_url(value)
+    if key=='proxy.dynamic.protocol' and value not in ('http','https','socks5'):
+        raise ValueError('动态代理协议必须为 HTTP、HTTPS 或 SOCKS5')
+    if key in ('sms.enabled','sub2api.enabled','proxy.enabled','proxy.dynamic.enabled') and value not in ('true','false'):
         raise ValueError('开关必须为 true 或 false')
     if key=='ytc.proxy_source' and value not in ('auto','provider','provided'):
         raise ValueError('ytc 代理来源必须为 auto、provider 或 provided')
@@ -27,7 +33,7 @@ def validate_config(key,value):
         item=get_provider(value)
         if key=='sms_provider.provider' and (not item or item.get('category')!='sms'):
             raise ValueError('请选择接码服务商目录中的服务商')
-        if key=='extract_provider.provider' and (not item or item.get('category') not in ('extract','extract_pay')):
+        if key=='extract_provider.provider' and (not item or item.get('provider_type') not in ('extract','extract_pay')):
             raise ValueError('请选择提炼服务商目录中的服务商')
         if key=='payment_provider.provider' and (not item or item.get('category') not in ('pay','extract_pay')):
             raise ValueError('请选择支付服务商目录中的服务商')
@@ -52,6 +58,8 @@ async def validate_integration_settings(db,values):
 
 
 def _masked(key: str, value: str) -> tuple[str, bool]:
+    if key == 'proxy.dynamic.api_url' and value:
+        return '****', True
     if key.endswith(SENSITIVE_SUFFIX) and value:
         return mask_secret(value), True
     return value, False
@@ -85,6 +93,21 @@ async def list_configs(admin: dict = Depends(get_current_admin), db=Depends(get_
         v, m = _masked(r["key"], r["value"])
         out.append({"key": r["key"], "value": v, "description": r["description"], "masked": m})
     return out
+
+
+@router.get("/supplier")
+async def supplier_config(admin: dict = Depends(get_current_admin), db=Depends(get_db)):
+    return await get_supplier_config(db)
+
+
+@router.put("/supplier")
+async def update_supplier(body: SupplierConfigUpdate, request: Request,
+                          admin: dict = Depends(get_current_admin), db=Depends(get_db)):
+    try: result = await save_supplier_config(db, body)
+    except ValueError as e: raise HTTPException(status_code=400, detail=str(e))
+    await log_action(db, admin["id"], "supplier_config", "config", None, "supplier profile saved",
+                     request.client.host if request.client else "")
+    return result
 
 
 @router.put("/{key}")

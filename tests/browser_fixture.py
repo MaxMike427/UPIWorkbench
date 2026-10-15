@@ -54,6 +54,14 @@ httpx.AsyncClient.post=integration_post
 proxy_service._probe=probe_get_result
 
 
+async def dynamic_fetch(config):
+    assert config['api_url']=='https://api.711proxy.com/gen?token=browser-private'
+    return [proxy_service.parse_proxy('http://203.0.113.71:10000')]
+
+
+proxy_service.fetch_dynamic_proxies=dynamic_fetch
+
+
 class Qual:
     def __init__(self,db,**kwargs):pass
     async def check_single(self,at):return CheckOutcome(True,'eligible',{'token_ok':True,'eligible':True})

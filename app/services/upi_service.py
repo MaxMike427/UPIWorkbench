@@ -10,7 +10,7 @@ import httpx
 
 from ..utils.helpers import utcnow_iso
 from .upi_providers import (ExecutionPaused, LocalUPIProvider, MasiPaymentProvider,
-    NerverUPIProvider, YtcUPIProvider)
+    NerverUPIProvider, WangyouUPIProvider, XxsyunPaymentProvider, YtcUPIProvider)
 from .report_service import safe_error
 
 
@@ -34,7 +34,7 @@ class UPIService:
                  ytc_poll_interval: float = 10.0,
                  max_retries: int = 5, retry_interval: float = 120.0,
                  ytc_proxy_source: str = "auto",
-                 ytc_payment_cdk: str = "",
+                  ytc_payment_cdk: str = "", payment_api_key: str = "",
                  wait_for_payment: bool = False,
                  ytc_proxies: list[str] | None = None,
                  # 兼容旧构造（nerver 直参）
@@ -59,6 +59,12 @@ class UPIService:
         elif provider == "nerver":
             self.provider = NerverUPIProvider(nerver_base_url, nerver_api_key, promo_id,
                                               pool_keep, pool_max, timeout=timeout)
+        elif provider == "wangyou":
+            if not payment_cdk:
+                raise RuntimeError("请先保存忘忧 UPI CDK")
+            self.provider = WangyouUPIProvider(ytc_base_url, payment_cdk,
+                                               entry_proxies=ytc_proxies or [], exit_proxies=ytc_proxies or [],
+                                               timeout=timeout)
         elif provider == "local":
             self.provider = LocalUPIProvider(base_url=ytc_base_url or nerver_base_url,
                                              proxies=ytc_proxies or [], timeout=timeout,
@@ -69,7 +75,11 @@ class UPIService:
             if not payment_cdk:
                 raise RuntimeError("请先保存 Masi 支付 CDK")
             self.payment_adapter = MasiPaymentProvider(payment_base_url, payment_cdk, timeout=timeout)
-        elif self.payment_provider not in (self.extract_provider, "ytc", "nerver"):
+        elif self.payment_provider == "xxsyun_upi":
+            if not (payment_api_key or payment_cdk):
+                raise RuntimeError("请先保存 upi.xxsyun API Key（ohk_）")
+            self.payment_adapter = XxsyunPaymentProvider(payment_base_url, payment_api_key or payment_cdk, timeout=timeout)
+        elif self.payment_provider not in (self.extract_provider, "ytc", "nerver", "wangyou"):
             raise ValueError(f"未知或未接入支付 provider: {self.payment_provider}")
         self.concurrency = max(1, concurrency)
         self.max_retries = max(1, max_retries)
@@ -87,9 +97,10 @@ class UPIService:
         if not cred:
             raise ValueError(f"credential {credential_id} 不存在")
         active = None
-        if self.wait_for_payment and self.provider_name == 'ytc':
-            async with self.db.execute("SELECT id,external_job_id FROM upi_tasks WHERE credential_id=?"
-                                       " AND status='processing' AND external_job_id IS NOT NULL ORDER BY id DESC LIMIT 1",(credential_id,)) as cur:
+        if self.provider_name in ('ytc', 'wangyou') or self.payment_provider == 'xxsyun_upi':
+            async with self.db.execute("SELECT id,external_job_id,external_job_secret,upi_link,payment_order_id FROM upi_tasks WHERE credential_id=?"
+                                       " AND status='processing' AND (external_job_id IS NOT NULL OR payment_order_id IS NOT NULL)"
+                                       " ORDER BY id DESC LIMIT 1",(credential_id,)) as cur:
                 active=await cur.fetchone()
         if active:
             task_id=active['id']
@@ -115,12 +126,23 @@ class UPIService:
         await self.db.execute("UPDATE upi_tasks SET status='processing' WHERE id=?", (task_id,))
         await self.db.commit()
         try:
-            if self.wait_for_payment and self.provider_name == 'ytc':
+            existing_link = active['upi_link'] if active and self.payment_provider == 'xxsyun_upi' else ''
+            if existing_link:
+                link, raw = existing_link, {"resumed_payment_order": active['payment_order_id']}
+            elif self.provider_name in ('ytc', 'wangyou'):
                 async def submitted(jid):
-                    await self.db.execute('UPDATE upi_tasks SET external_job_id=? WHERE id=?',(jid,task_id))
+                    if isinstance(jid, dict):
+                        await self.db.execute('UPDATE upi_tasks SET external_job_id=?,external_job_secret=? WHERE id=?',
+                                               (jid.get('job_id',''),jid.get('job_secret',''),task_id))
+                    else:
+                        await self.db.execute('UPDATE upi_tasks SET external_job_id=? WHERE id=?',(jid,task_id))
                     await self.db.commit()
                 self.provider.on_submitted=submitted
                 kwargs={'job_id':active['external_job_id'] if active else None}
+                if self.provider_name == 'wangyou':
+                    async with self.db.execute('SELECT external_job_secret FROM upi_tasks WHERE id=?',(task_id,)) as cur:
+                        current=await cur.fetchone()
+                    kwargs['job_secret']=current['external_job_secret'] if current else None
                 if self.provider_name=='local':kwargs['account_email']=account_email
                 link,raw=await self.provider.fetch_link(token,self.concurrency,**kwargs)
             else:
@@ -130,18 +152,31 @@ class UPIService:
         except ExecutionPaused as e:
             return {**(await self._get(task_id)), 'status':'paused', 'error_msg':str(e)}
         except Exception as e:
-            if self.wait_for_payment and self.provider_name == 'ytc' and isinstance(e,httpx.RequestError):
+            if self.provider_name in ('ytc', 'wangyou') and isinstance(e,httpx.RequestError):
                 saved=await self._get(task_id)
                 if saved.get('external_job_id'):
                     return {**saved,'status':'paused','error_msg':'等待原支付订单状态，请继续任务核对'}
             return await _fail(str(e)[:500])
         if not link:
             return await _fail("no-next-action")
+        await self.db.execute("UPDATE upi_tasks SET upi_link=?, updated_at=? WHERE id=?",
+                              (link, utcnow_iso(), task_id))
+        await self.db.commit()
         if self.payment_adapter is not None:
             self.payment_adapter.should_continue=getattr(self.provider, 'should_continue', None)
             self.payment_adapter.on_progress=getattr(self.provider, 'on_progress', None)
             try:
-                payment=await self.payment_adapter.create_or_wait(link, token, account_email)
+                payment_kwargs={}
+                if isinstance(self.payment_adapter, XxsyunPaymentProvider):
+                    async def payment_submitted(order_id):
+                        await self.db.execute('UPDATE upi_tasks SET payment_order_id=? WHERE id=?',(order_id,task_id))
+                        await self.db.commit()
+                    self.payment_adapter.on_submitted=payment_submitted
+                    async with self.db.execute('SELECT payment_order_id FROM upi_tasks WHERE id=?',(task_id,)) as cur:
+                        payment_row=await cur.fetchone()
+                    payment_kwargs['order_id']=payment_row['payment_order_id'] if payment_row else None
+                    payment_kwargs['on_submitted']=payment_submitted
+                payment=await self.payment_adapter.create_or_wait(link, token, account_email, **payment_kwargs)
             except Exception as exc:
                 return await _fail(str(exc)[:500])
             if payment.get('status')=='paused':

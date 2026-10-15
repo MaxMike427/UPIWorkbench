@@ -67,18 +67,62 @@ test('downloads send authorization instead of opening a cookie-only URL', async 
   assert.ok(downloads[0].name.endsWith('.txt'));
 });
 
-test('settings contain separate SMS, extraction and payment code forms', async () => {
+test('settings load one supplier summary without exposing separate credential forms', async () => {
   const app=createApp();
-  app.api=async()=>[
+  app.api=async url=>url==='/api/configs/supplier'?{summary:'ytc 内置代理 · 提链+支付 · Handy 接码',credential_items:[],credential_status:{ytc:true}}:[
     {key:'sms_provider.cdk',value:'****',masked:true},
     {key:'extract_provider.cdk',value:'****',masked:true},
     {key:'payment_provider.cdk',value:'****',masked:true},
     {key:'app.concurrency',value:'7',masked:false},
     {key:'qualification.api_url',value:'https://hidden.example',masked:false}];
   await app.loadConfigs();
-  assert.deepEqual(Array.from(app.configs,c=>c.key),['sms_provider.cdk','extract_provider.cdk','payment_provider.cdk']);
-  assert.ok(app.configs.every(c=>c.value===''));
+  assert.equal(app.supplierConfig.summary,'ytc 内置代理 · 提链+支付 · Handy 接码');
+  assert.equal(app.configs,undefined);
   assert.equal(app.concurrencyValue,'7');
+  const settings=html.match(/<section x-show="tab==='settings'"[\s\S]*?<\/section>/)[0];
+  assert.match(settings,/供应商配置/);
+  assert.doesNotMatch(settings,/saveYtcProxySource\(\)|x-for="c in configs"/);
+  assert.doesNotMatch(html,/async saveSmsEnabled|async saveYtcProxySource|async saveConfig\(/);
+});
+
+test('supplier wizard skips integrated payment, confirms before saving, and cancels without writes', async () => {
+  const app=createApp();
+  app.providers=[{id:'ytc',name:'ytc',category:'extract_pay',combined:true},{id:'handy',name:'Handy',category:'sms'}];
+  app.supplierConfig={credential_status:{ytc:true,handy:true}};
+  const calls=[];
+  app.api=async (url,opt)=>{calls.push([url,opt]);return {summary:'saved',credential_items:[]};};
+  app.beginSupplierConfig();
+  app.chooseSupplierFlow('extract_pay');
+  app.chooseSupplierExtract('ytc');
+  app.chooseSupplierProxy('provider');
+  assert.equal(app.supplierStep,5);
+  app.chooseSupplierSms('yes');
+  assert.equal(app.supplierStep,6);
+  app.chooseSupplierSmsProvider('handy');
+  assert.equal(app.supplierStep,7);
+  app.reviewSupplierConfig();
+  assert.equal(app.supplierStep,8);
+  assert.equal(calls.length,0);
+  app.previousSupplierStep();
+  assert.equal(app.supplierStep,7);
+  app.reviewSupplierConfig();
+  await app.saveSupplierConfig();
+  const body=JSON.parse(calls[0][1].body);
+  assert.deepEqual(body,{flow_type:'extract_pay',extract_provider:'ytc',payment_provider:'ytc',proxy_source:'provider',sms_enabled:true,sms_provider:'handy',credentials:{}});
+  assert.equal(app.supplierStep,0);
+  app.beginSupplierConfig();app.supplierDraft.credentials.ytc='ohk_discard';
+  app.cancelSupplierConfig();
+  assert.equal(calls.length,1);
+  assert.equal(app.supplierStep,0);
+  assert.ok(!JSON.stringify(app.supplierDraft).includes('ohk_discard'));
+});
+
+test('supplier options do not append placeholder suffixes to provider names', () => {
+  const settings=html.match(/<section x-show="tab==='settings'"[\s\S]*?<\/section>/)[0];
+  assert.doesNotMatch(settings,/\+\(p\.id==='ytc'\?'':'（占位）'\)/);
+  assert.doesNotMatch(settings,/\+\(p\.id==='handy'\?'':'（占位）'\)/);
+  assert.doesNotMatch(settings,/\+\(p\.id==='xxsyun_upi'\?'（使用 ytc API Key）':'（占位）'\)/);
+  assert.match(settings,/未接入的组合会在确认或启动时提示/);
 });
 
 test('single and multiple JSON downloads select CPA, sub2api or both', async () => {
@@ -150,28 +194,20 @@ test('concurrency control only saves nonzero positive integers', async () => {
   assert.deepEqual(JSON.parse(calls[0].opt.body),{value:'6'});
 });
 
-test('purchase and CDK action links are hardcoded at their requested locations', () => {
+test('account purchase uses one supplier dropdown and source filter keeps cross-page selection', async () => {
+  const app=createApp();
   const accounts=html.match(/<section x-show="tab==='credentials'"[\s\S]*?<\/section>/)[0];
-  const settings=html.match(/<section x-show="tab==='settings'"[\s\S]*?<\/section>/)[0];
-  const links=[
-    [accounts,'https://wzyp.cn/shop/CPZF8PBK','去购买 · 0217'],
-    [accounts,'https://wzyp.cn/shop/8UOIIRW2','去购买 · AI 批发商'],
-    [settings,'https://wzyp.cn/shop/8Q9RHH0W','去购买'],
-    [settings,'https://apihub.space/handy/','CDK 融合'],
-    [settings,'https://wzyp.cn/shop/Camellia','去购买'],
-    [settings,'https://upi.xxsyun.xyz/employer/tickets/','提交 CDK'],
-  ];
-  for(const [section,url,label] of links){
-    const anchor=[...section.matchAll(/<a\b([^>]*)>([^<]*)<\/a>/g)].find(m=>m[1].includes('href="'+url+'"'));
-    assert.ok(anchor,'missing direct link: '+url);
-    assert.equal(anchor[2],label);
-    assert.ok(anchor[1].includes('target="_blank"'));
-    assert.ok(anchor[1].includes('rel="noopener noreferrer"'));
-    assert.ok(!anchor[1].includes('@click'));
-  }
-  assert.ok(settings.indexOf('shop/8Q9RHH0W')<settings.indexOf('https://apihub.space/handy/'));
-  assert.ok(settings.indexOf('shop/Camellia')<settings.indexOf('https://upi.xxsyun.xyz/employer/tickets/'));
-  assert.ok(!accounts.includes('purchaseLink()') && !settings.includes('purchaseLink()'));
+  assert.equal([...accounts.matchAll(/>去购买<\/a>/g)].length,1);
+  assert.doesNotMatch(accounts,/去购买 · 0217|去购买 · AI 批发商/);
+  assert.match(accounts,/选择账号服务商/);
+  assert.match(accounts,/按来源文件筛选/);
+  app.selCred=[1,5];app.credPage=3;app.credSource='imports & 1.txt';
+  const calls=[];
+  app.api=async url=>{calls.push(url);return {items:[],total:0};};
+  await app.changeCredSource();
+  assert.equal(app.credPage,1);
+  assert.equal(new URLSearchParams(calls[0].split('?')[1]).get('source_file'),'imports & 1.txt');
+  assert.deepEqual(Array.from(app.selCred),[1,5]);
 });
 
 test('selected-account entry only shows selected rows and deselect removes candidates', async () => {
@@ -221,7 +257,9 @@ test('proxy library exposes add import free-import batch-delete and row test con
   assert.doesNotMatch(section,/免费代理导入|proxy\.scdn\.io|import-free/);
   assert.match(section,/动态 IP（网关代理/);
   assert.match(section,/动态标记/);
-  assert.doesNotMatch(section,/API 拉取|proxy-api-url|fetch-api|拉取并添加|代理 API 地址/);
+  assert.match(section,/711proxy 动态代理/);
+  assert.match(section,/保存动态代理配置/);
+  assert.match(section,/拉取并添加/);
   assert.match(html,/async toggleProxyDynamic\(proxy\)/);
   assert.match(html,/exits\.slice\(0,2\)\.join/);
   assert.match(section,/选择全部代理/);
@@ -230,4 +268,39 @@ test('proxy library exposes add import free-import batch-delete and row test con
   assert.match(html,/proxyTestText\(result\)/);
   assert.match(html,/tested_protocol/);
   assert.match(html,/出口 '\+result\.exit_ip/);
+});
+
+test('dynamic proxy save and fetch are separate and secrets are cleared after save', async () => {
+  const app=createApp();const calls=[];
+  app.dynamicProxyUrl='https://api.711proxy.com/gen?token=secret';app.dynamicProxyEnabled=true;app.dynamicProxyProtocol='socks5';
+  app.api=async(url,opt)=>{calls.push([url,opt]);return url.endsWith('/fetch')?{items:[],fetched:2,enabled:false}:{url_saved:true,enabled:true,protocol:'socks5',host:'api.711proxy.com'};};
+  await app.saveDynamicProxyConfig();
+  assert.equal(calls.length,1);
+  assert.equal(calls[0][0],'/api/proxies/dynamic');
+  assert.equal(app.dynamicProxyUrl,'');
+  await app.fetchDynamicProxies();
+  assert.equal(calls[1][0],'/api/proxies/dynamic/fetch');
+  assert.ok(!calls[1][1].body);
+});
+
+test('supplier extract-only flow asks for payment and no SMS skips supplier question', () => {
+  const app=createApp();app.supplierConfig={credential_status:{lumen:true,masi:true}};
+  app.beginSupplierConfig();app.chooseSupplierFlow('extract');app.chooseSupplierExtract('lumen');app.chooseSupplierProxy('system');
+  assert.equal(app.supplierStep,4);
+  app.chooseSupplierPayment('masi');app.chooseSupplierSms('no');
+  assert.equal(app.supplierStep,7);
+  assert.deepEqual(Array.from(app.supplierCredentialIds()),['lumen','masi']);
+  app.reviewSupplierConfig();assert.equal(app.supplierStep,8);assert.equal(app.supplierDraftExecutable(),false);
+  app.previousSupplierStep();app.previousSupplierStep();assert.equal(app.supplierStep,5);
+  app.chooseSupplierSms('yes');assert.equal(app.supplierStep,6);
+  app.chooseSupplierFlow('extract_pay');assert.equal(app.supplierStep,2);assert.deepEqual(Array.from(app.supplierCredentialIds()),[]);
+});
+
+test('logout clears unsaved supplier and dynamic proxy secrets even while busy', () => {
+  const app=createApp();app.busy=true;
+  app.supplierStep=7;app.supplierDraft.credentials={ytc:'ohk_unsaved'};app.dynamicProxyUrl='https://api.711proxy.com/gen?token=unsaved';
+  app.logout();
+  assert.equal(app.supplierStep,0);
+  assert.equal(app.dynamicProxyUrl,'');
+  assert.ok(!JSON.stringify(app.supplierDraft).includes('ohk_unsaved'));
 });

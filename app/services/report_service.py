@@ -11,12 +11,19 @@ from ..config import get_settings
 
 def safe_error(value: str) -> str:
     """报告/终端只写已知安全的摘要，不复制第三方原始 JSON。"""
+    checkout = re.search(r"checkout_http_(\d+)(?:\s+\(([^)]{1,120})\))?", str(value or ""))
+    if checkout:
+        reason = re.sub(r"[^A-Za-z0-9_.:/ -]", "", checkout.group(2) or "").strip()
+        return f"本地提链结账被上游拒绝（HTTP {checkout.group(1)}{': ' + reason if reason else ''}）"
     labels = {
         "not-eligible": "账号无资格", "empty-token": "缺少访问令牌", "jwt-expired": "访问令牌过期",
         "token-401": "访问令牌失效", "no_link": "未获取到支付链接", "no-next-action": "未获取到支付链接",
         "SentinelFlowUnavailableError": "接码平台登录校验失败", "timeout": "等待平台结果超时",
         "fetch-error": "平台网络请求失败", "quota": "平台额度不足",
         "代理": "代理连接异常，请检查代理库", "proxy": "代理连接异常，请检查代理库",
+        "checkout_http_400": "本地提链结账请求被上游拒绝（HTTP 400）",
+        "checkout_http_401": "本地提链账号认证失败（HTTP 401）",
+        "checkout_http_403": "本地提链请求被上游拒绝（HTTP 403）",
     }
     for needle, text in labels.items():
         if needle in str(value):

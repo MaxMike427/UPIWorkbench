@@ -9,6 +9,7 @@ from ..models import UPICreateRequest, UPICreateResult
 from ..services.upi_service import UPIService
 from ..services.upi_providers import select_ytc_api_key
 from ..services.report_service import safe_error
+from ..services.provider_config_service import config_values, provider_credential, provider_api_key, get_supplier_config
 
 router = APIRouter(prefix="/api/upi", tags=["upi"])
 
@@ -30,6 +31,15 @@ async def _provider_settings(db) -> dict:
         payment = extract
     if extract == "local_zero_link":
         extract = "local"
+    values = await config_values(db)
+    if 'supplier.flow_type' in values:
+        profile = await get_supplier_config(db)
+        if not profile['executable']:
+            raise HTTPException(status_code=400, detail=profile['warning'])
+        key = provider_credential(values, extract)
+    else:
+        key = select_ytc_api_key(*(values.get(k, '') for k in
+            ('extract_provider.cdk','payment_provider.cdk','upi_provider.cdk','upi_provider.api_key')))
     return {
         "provider": extract,
         "extract_provider": extract,
@@ -39,10 +49,7 @@ async def _provider_settings(db) -> dict:
         "payment_base_url": await _cfg(db, "payment_provider.base_url", "https://masi.cc.cd"),
         "payment_cdk": await _cfg(db, "payment_provider.cdk", ""),
         "ytc_proxy_source": await _cfg(db, "ytc.proxy_source", "auto"),
-        "key": select_ytc_api_key(await _cfg(db, "extract_provider.cdk", ""),
-                                   await _cfg(db, "payment_provider.cdk", ""),
-                                   await _cfg(db, "upi_provider.cdk", ""),
-                                   await _cfg(db, "upi_provider.api_key", "")),
+        "key": key,
     }
 
 
@@ -50,6 +57,7 @@ def _public(task: dict) -> dict:
     t = dict(task)
     # 原始平台响应仅留在本地 DB，可能包含账号 token 或代理认证 URI。
     t.pop('raw_response',None)
+    t.pop('external_job_secret',None)
     if t.get('error_msg'):t['error_msg']=safe_error(t['error_msg'])
     return t
 
@@ -60,15 +68,16 @@ async def _ytc_proxies(db,provider,proxy_source='auto'):
             return []
         async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:
             return [r['url'] async for r in cur]
-    if provider!='ytc':return None
+    if provider not in ('ytc','wangyou'):return None
     if proxy_source=='provider':return []
     async with db.execute('SELECT url FROM proxies ORDER BY id') as cur:proxies=[r['url'] async for r in cur]
     if proxy_source=='auto' and (await _cfg(db,'proxy.enabled')!='true' or not proxies):
         return []
     if proxy_source=='provided' and (await _cfg(db,'proxy.enabled')!='true' or not proxies):
         raise HTTPException(status_code=400,detail='新提链需要开启代理库并保存有效代理')
-    if any(proxy.split('://',1)[0].lower() not in ('http','https','socks5') for proxy in proxies):
-        raise HTTPException(status_code=400,detail='任务代理包含 ytc 不支持的协议，仅支持 HTTP/HTTPS/SOCKS5')
+    allowed=('http','https','socks5','socks5h') if provider=='wangyou' else ('http','https','socks5')
+    if any(proxy.split('://',1)[0].lower() not in allowed for proxy in proxies):
+        raise HTTPException(status_code=400,detail='任务代理包含当前服务商不支持的协议，请检查 HTTP/HTTPS/SOCKS5/SOCKS5H 配置')
     return proxies
 
 
@@ -87,13 +96,15 @@ async def create(body: UPICreateRequest, request: Request,
     proxies=await _ytc_proxies(db,provider,settings.get('ytc_proxy_source','auto'))
     ytc_base = settings["base_url"]
     ytc_key = settings["key"]
+    payment_key = settings["payment_cdk"]
+    payment_api_key = provider_api_key(await config_values(db), settings["payment_provider"])
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
     try:
         svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
                          payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
-                         payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
+                          payment_base_url=settings["payment_base_url"], payment_cdk=payment_key, payment_api_key=payment_api_key,
                          ytc_proxy_source=settings.get('ytc_proxy_source','auto'),
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id, concurrency=body.concurrency,
@@ -145,13 +156,15 @@ async def retry(task_id: int, request: Request,
     proxies=await _ytc_proxies(db,provider,settings.get('ytc_proxy_source','auto'))
     ytc_base = settings["base_url"]
     ytc_key = settings["key"]
+    payment_key = settings["payment_cdk"]
+    payment_api_key = provider_api_key(await config_values(db), settings["payment_provider"])
     nerver_base = await _cfg(db, "qualification.api_url", "https://cha.nerver.cc")
     nerver_key = await _cfg(db, "qualification.api_key", "")
     promo_id = await _cfg(db, "qualification.promo_id", "plus-1-month-free")
     try:
         svc = UPIService(db=db, provider=provider, extract_provider=settings["extract_provider"],
                          payment_provider=settings["payment_provider"], ytc_base_url=ytc_base, ytc_api_key=ytc_key,
-                         payment_base_url=settings["payment_base_url"], payment_cdk=settings["payment_cdk"],
+                           payment_base_url=settings["payment_base_url"], payment_cdk=payment_key, payment_api_key=payment_api_key,
                          ytc_proxy_source=settings.get('ytc_proxy_source','auto'),
                          nerver_base_url=nerver_base, nerver_api_key=nerver_key,
                          promo_id=promo_id,ytc_proxies=proxies)

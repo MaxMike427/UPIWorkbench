@@ -2,9 +2,13 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
+import json
 import re
+import socket
 import ssl
 import time
+import weakref
 from urllib.parse import quote, urlsplit, urlunsplit
 
 import httpx
@@ -13,6 +17,7 @@ PROBE_TARGET='https://api.ipify.org?format=json'
 PROBE_TIMEOUT=6.0
 PROBE_CONCURRENCY=8
 DYNAMIC_SAMPLES=3
+_DYNAMIC_RATE = weakref.WeakKeyDictionary()
 
 
 _COLON_CREDENTIAL=re.compile(r'^(?P<scheme>[a-z0-9+.-]*://)?(?P<host>[^:\[\]/@]+):(?P<port>\d{1,5}):(?P<user>[^:@/\s]+):(?P<pass>[^:@/\s]+)$',re.I)
@@ -63,6 +68,133 @@ def masked_proxy(value:str)->str:
     host=f'[{url.hostname}]' if ':' in (url.hostname or '') else url.hostname
     auth='****:****@' if url.username is not None else ''
     return f'{url.scheme}://{auth}{host}:{url.port}'
+
+
+def validate_dynamic_url(value:str)->str:
+    try:
+        url=urlsplit(value.strip())
+        host=url.hostname or ''
+        official_host=(host=='711proxy.com' or host.endswith('.711proxy.com') or
+                       host.endswith('.rotgbapi.trustsource.live'))
+        allowed_port=url.port in (None,80,443) or (host.endswith('.rotgbapi.trustsource.live') and url.port==8089)
+        if (url.scheme not in ('http','https') or not official_host
+                or url.username is not None or url.password is not None or url.fragment
+                or not allowed_port or any(ord(c)<33 for c in value)):
+            raise ValueError()
+    except ValueError:
+        raise ValueError('请填写 711proxy 官方控制台生成的 HTTP/HTTPS API URL，不支持其它域名或内网地址')
+    return value.strip()
+
+
+async def dynamic_config_values(db)->dict:
+    async with db.execute("SELECT key,value FROM configs WHERE key LIKE 'proxy.dynamic.%'") as cur:
+        values={r['key']:r['value'] async for r in cur}
+    return {'api_url':values.get('proxy.dynamic.api_url',''),
+            'protocol':values.get('proxy.dynamic.protocol','http'),
+            'enabled':values.get('proxy.dynamic.enabled')=='true'}
+
+
+async def get_dynamic_config(db)->dict:
+    config=await dynamic_config_values(db)
+    return {'provider':'711proxy','protocol':config['protocol'],'enabled':config['enabled'],
+            'url_saved':bool(config['api_url']), 'host':urlsplit(config['api_url']).hostname if config['api_url'] else '',
+            'storage_key':'proxy.dynamic.api_url'}
+
+
+async def save_dynamic_config(db,body)->dict:
+    current=await dynamic_config_values(db)
+    url=validate_dynamic_url(body.api_url) if body.api_url.strip() else current['api_url']
+    if body.enabled and not url:raise ValueError('启用动态代理前请保存 711proxy API URL')
+    for key,value in {'api_url':url,'protocol':body.protocol,'enabled':'true' if body.enabled else 'false'}.items():
+        await db.execute("INSERT INTO configs(key,value) VALUES(?,?) ON CONFLICT(key)"
+                         " DO UPDATE SET value=excluded.value,updated_at=CURRENT_TIMESTAMP",('proxy.dynamic.'+key,value))
+    await db.commit()
+    return await get_dynamic_config(db)
+
+
+async def _validate_dynamic_host(host:str)->None:
+    try:
+        records=await asyncio.wait_for(asyncio.get_running_loop().getaddrinfo(host,None,type=socket.SOCK_STREAM),timeout=10)
+    except (OSError,TimeoutError):raise ValueError('711proxy 域名解析失败，请稍后重试') from None
+    if not records or any(not ipaddress.ip_address(r[4][0]).is_global for r in records):
+        raise ValueError('711proxy API 必须解析到公网地址')
+
+
+def _dynamic_client():
+    return httpx.AsyncClient(timeout=20,follow_redirects=False,trust_env=False)
+
+
+def _dynamic_proxy_items(text:str,protocol:str)->list[dict]:
+    raw=text.lstrip('\ufeff').strip()
+    if raw.startswith(('{','[')):
+        try:data=json.loads(raw)
+        except ValueError:raise ValueError('711proxy 返回的 JSON 格式无效') from None
+        if isinstance(data,dict):
+            if data.get('success') is False or data.get('code') not in (None,0,200,'0','200'):
+                raise ValueError('711proxy API 返回失败，请检查额度、提取链接和 IP 白名单')
+            data=data.get('data',data.get('proxies',[]))
+            if isinstance(data,dict):data=data.get('list',data.get('proxies',[]))
+        if not isinstance(data,list):raise ValueError('711proxy 未返回代理列表，请选择 TXT 换行或 JSON 格式')
+        lines=[]
+        for row in data:
+            if isinstance(row,str):lines.append(row)
+            elif isinstance(row,dict):
+                host=row.get('ip') or row.get('host') or row.get('server')
+                port=row.get('port')
+                if not host or not port:raise ValueError('711proxy 代理列表缺少主机或端口')
+                auth=''
+                user=row.get('username') or row.get('user')
+                password=row.get('password')
+                if user is not None and password is not None:auth=f'{quote(str(user),safe="")}:{quote(str(password),safe="")}@'
+                lines.append(f'{protocol}://{auth}{host}:{port}')
+            else:raise ValueError('711proxy 代理列表格式无效')
+    else:
+        lines=re.split(r'[\r\n\t]+',raw)
+    if len(lines)>900:raise ValueError('单次最多提取 900 个代理')
+    items=[];seen=set()
+    for line in lines:
+        if not line.strip():continue
+        try:
+            item=parse_proxy(line if '://' in line else protocol+'://'+line)
+        except ValueError:raise ValueError('711proxy 返回内容不是有效代理，请使用 TXT 每行一个 host:port 或 JSON 格式') from None
+        if item['url'] not in seen:items.append(item);seen.add(item['url'])
+    if not items:raise ValueError('711proxy 未返回可用代理，请检查额度和 IP 白名单')
+    return items
+
+
+async def fetch_dynamic_proxies(config:dict)->list[dict]:
+    url=validate_dynamic_url(config.get('api_url',''))
+    await _validate_dynamic_host(urlsplit(url).hostname)
+    # 711proxy 文档要求提取请求间隔至少 1 秒；不同任务和手动取链共用节流。
+    loop=asyncio.get_running_loop()
+    state=_DYNAMIC_RATE.get(loop)
+    if state is None:
+        state={'lock':asyncio.Lock(),'last':None};_DYNAMIC_RATE[loop]=state
+    async with state['lock']:
+        if state['last'] is not None:
+            delay=1.0-(loop.time()-state['last'])
+            if delay>0:await asyncio.sleep(delay)
+        state['last']=loop.time()
+    try:
+        async with _dynamic_client() as client:
+            async with client.stream('GET',url) as response:
+                if response.status_code!=200:raise ValueError(f'711proxy API 请求失败（HTTP {response.status_code}），请检查提取链接和 IP 白名单')
+                content=bytearray()
+                async for chunk in response.aiter_bytes():
+                    content.extend(chunk)
+                    if len(content)>200000:raise ValueError('711proxy API 响应过大，已停止读取')
+    except (httpx.HTTPError,OSError):raise ValueError('711proxy API 连接失败，请检查网络或稍后重试') from None
+    try:text=content.decode('utf-8-sig')
+    except UnicodeDecodeError:raise ValueError('711proxy API 返回内容编码无效') from None
+    return _dynamic_proxy_items(text,config.get('protocol','http'))
+
+
+async def fetch_and_append_dynamic(db)->dict:
+    config=await dynamic_config_values(db)
+    items=await fetch_dynamic_proxies(config)
+    async with db.execute("SELECT value FROM configs WHERE key='proxy.enabled'") as cur:row=await cur.fetchone()
+    result=await append_proxies(db,'\n'.join(p['url'] for p in items),bool(row) and row['value']=='true',True)
+    return {**result,'fetched':len(items)}
 
 
 async def get_proxies(db)->dict:

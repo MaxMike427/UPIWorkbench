@@ -11,6 +11,7 @@ ytc 契约（前端 JS 逆向，见 INTEGRATION.md §3）：
 from __future__ import annotations
 
 import json
+import hashlib
 import time
 import asyncio
 
@@ -112,6 +113,9 @@ class LocalUPIProvider:
                 await self.on_submitted("local")
             return link, {"provider":"local","result":result}
         reason=result.get("error") if isinstance(result, dict) else "local failed"
+        upstream=result.get("upstream_code") if isinstance(result, dict) else ""
+        if upstream:
+            reason=f"{reason} ({upstream})"
         raise RuntimeError(str(reason))
 
 
@@ -126,7 +130,8 @@ class MasiPaymentProvider:
         self.should_continue = None
         self.on_progress = None
 
-    async def create_or_wait(self, link: str, access_token: str, email: str = "") -> dict:
+    async def create_or_wait(self, link: str, access_token: str, email: str = "", order_id: str | None = None,
+                             on_submitted=None) -> dict:
         headers = {"Content-Type": "application/json", "User-Agent": "UPIWorkbench/1.2"}
         body = {"ticket": self.cdk, "link": link, "access_token": access_token,
                 "email": email, "require_online_workers": True}
@@ -170,6 +175,137 @@ class MasiPaymentProvider:
                             "raw": queried}
             return {"status": "failed", "order_id": order_id, "error_msg": "支付订单查询超时"}
 
+
+class XxsyunPaymentProvider:
+    """Camellia/OrderHub 支付：Bearer ytc API Key + /api/v1/orders。"""
+    def __init__(self, base_url: str, api_key: str, timeout: float = 600.0, poll_interval: float = 5.0):
+        self.base_url = base_url.rstrip("/")
+        if self.base_url.endswith('/api/v1'): self.base_url=self.base_url[:-7]
+        self.api_key = api_key or ""
+        self.timeout = timeout
+        self.poll_interval = max(0.0, poll_interval)
+        self.should_continue = None
+        self.on_progress = None
+
+    def _headers(self):
+        return {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+    @staticmethod
+    def _order_id(data):
+        for item in data.get("created", []) if isinstance(data, dict) else []:
+            order = item.get("order") if isinstance(item, dict) else {}
+            if isinstance(order, dict) and order.get("id"): return str(order["id"])
+        for item in data.get("duplicated", []) if isinstance(data, dict) else []:
+            order = item.get("order") if isinstance(item, dict) else {}
+            if isinstance(order, dict) and order.get("id"): return str(order["id"])
+        return ""
+
+    async def create_or_wait(self, link: str, access_token: str, email: str = "", order_id: str | None = None,
+                             on_submitted=None) -> dict:
+        if not self.api_key:
+            return {"status": "failed", "error_msg": "upi.xxsyun 支付服务需要 ytc ohk_ API Key"}
+        async with httpx.AsyncClient() as client:
+            if not order_id:
+                body={"items":[{"at":access_token.strip(),"link":link}],"dispatch_mode":"auto"}
+                key=hashlib.sha256(f"{access_token}\n{link}".encode()).hexdigest()[:32]
+                response=await client.post(f"{self.base_url}/api/v1/orders/batch", json=body,
+                                           headers={**self._headers(),"Idempotency-Key":f"upi-workbench-{key}"}, timeout=30.0)
+                try:data=response.json()
+                except Exception:data={}
+                if response.status_code >= 400 or not isinstance(data,dict) or not data.get("ok"):
+                    error=data.get("error") if isinstance(data,dict) else ""
+                    if isinstance(error,dict): error=error.get("message") or error.get("code") or ""
+                    return {"status":"failed","error_msg":str(error or f"支付订单创建失败（HTTP {response.status_code}）")[:300]}
+                order_id=self._order_id(data)
+                if not order_id:return {"status":"failed","error_msg":"支付服务未返回订单 ID"}
+                if on_submitted: await on_submitted(order_id)
+            deadline=time.monotonic()+self.timeout
+            while time.monotonic()<deadline:
+                if self.should_continue and not await self.should_continue():return {"status":"paused","order_id":order_id}
+                await asyncio.sleep(self.poll_interval)
+                query=await client.get(f"{self.base_url}/api/v1/orders/{order_id}",headers=self._headers(),timeout=30.0)
+                try:payload=query.json()
+                except Exception:payload={}
+                order=payload.get("order") if isinstance(payload,dict) else {}
+                order=order if isinstance(order,dict) else {}
+                status=str(order.get("status") or payload.get("status") or "").lower()
+                if self.on_progress:await self.on_progress(f"upi.xxsyun：订单 {status or '处理中'}")
+                if status in ("completed","success","paid"):
+                    return {"status":"success","order_id":order_id,"raw":payload}
+                if status in ("failed","cancelled","expired","rejected"):
+                    return {"status":"failed","order_id":order_id,"error_msg":str(order.get("failure_reason") or order.get("error") or status)[:300],"raw":payload}
+            return {"status":"failed","order_id":order_id,"error_msg":"支付订单查询超时"}
+
+
+class WangyouUPIProvider:
+    """忘忧公益提链：checkout 任务以 job_secret 鉴权并异步查询结果。"""
+    def __init__(self, base_url: str, cdk: str = "", entry_proxies=None, exit_proxies=None,
+                 timeout: float = 1800.0, poll_interval: float = 2.0):
+        self.base_url = base_url.rstrip("/")
+        self.cdk = cdk or ""
+        self.entry_proxies = list(entry_proxies or [])
+        self.exit_proxies = list(exit_proxies or [])
+        self.timeout = timeout
+        self.poll_interval = max(0.0, poll_interval)
+        self.should_continue = None
+        self.on_progress = None
+        self.on_submitted = None
+
+    async def _progress(self, client, job_id, secret):
+        response = await client.get(f"{self.base_url}/api/checkout-progress", params={"job_id": job_id},
+                                    headers={"X-Pay153-Job-Secret": secret}, timeout=30.0)
+        try: data = response.json()
+        except Exception: data = {}
+        if response.status_code >= 400 or not isinstance(data, dict):
+            raise RuntimeError(f"wangyou 查询任务失败（HTTP {response.status_code}）")
+        return data
+
+    @staticmethod
+    def _link(result):
+        result = result if isinstance(result, dict) else {}
+        return (result.get("short_link") or result.get("provider_redirect_url") or
+                result.get("checkout_url") or result.get("qr_data") or "")
+
+    async def fetch_link(self, at: str, concurrency: int = 5, job_id: str | None = None,
+                         job_secret: str | None = None) -> tuple[str, dict]:
+        async with httpx.AsyncClient() as client:
+            if not job_id:
+                body = {"token": at.strip(), "entry_proxies": self.entry_proxies,
+                        "exit_proxies": self.exit_proxies, "cdk": self.cdk,
+                        "plan": "plus", "link_type": "upi", "retry_count": max(1, concurrency),
+                        "use_promo": True, "upi_vpa": ""}
+                if not self.cdk: body.pop("cdk")
+                response = await client.post(f"{self.base_url}/api/checkout", json=body,
+                                             headers={"Content-Type": "application/json"}, timeout=30.0)
+                try: created = response.json()
+                except Exception: created = {}
+                if response.status_code != 202 or not isinstance(created, dict) or not created.get("job_id"):
+                    raise RuntimeError(str(created.get("error") or f"wangyou 创建任务失败（HTTP {response.status_code}）")[:300])
+                job_id = str(created["job_id"])
+                job_secret = str(created.get("job_secret") or "")
+                if not job_secret: raise RuntimeError("wangyou 未返回任务凭据")
+                if self.on_submitted: await self.on_submitted({"job_id": job_id, "job_secret": job_secret})
+            elif not job_secret:
+                raise RuntimeError("wangyou 原任务缺少 job_secret，不能安全继续查询")
+            deadline = time.monotonic() + self.timeout
+            while time.monotonic() < deadline:
+                if self.should_continue and not await self.should_continue():
+                    raise ExecutionPaused("wangyou 原任务仍在执行，任务已请求暂停")
+                data = await self._progress(client, job_id, job_secret)
+                status = str(data.get("status") or "").lower()
+                result = data.get("result") if isinstance(data.get("result"), dict) else {}
+                if self.on_progress:
+                    await self.on_progress(f"wangyou：{data.get('text') or status or '查询任务进度'}")
+                link = self._link(result)
+                if link and status in ("done", "error", "cancelled"):
+                    if status != "done": raise RuntimeError(str(data.get("error") or "wangyou 任务失败")[:300])
+                    return link, {"provider": "wangyou", "job_id": job_id, "job_secret": job_secret,
+                                  "status": status, "result": result}
+                if status in ("error", "cancelled"):
+                    raise RuntimeError(str(data.get("error") or f"wangyou 任务 {status}")[:300])
+                await asyncio.sleep(self.poll_interval)
+            raise ExecutionPaused("wangyou 任务查询超时，请继续查询原任务，不重复提交")
+
 class YtcUPIProvider:
     def __init__(self, base_url: str, api_key: str, timeout: float = 600.0,
                  poll_interval: float = 10.0, wait_for_payment: bool = False,
@@ -180,7 +316,7 @@ class YtcUPIProvider:
         self.poll_interval = poll_interval
         self.wait_for_payment = wait_for_payment
         self.proxies=proxies or []
-        self.proxy_source=proxy_source if proxy_source in ('auto','internal','provided') else 'auto'
+        self.proxy_source='internal' if proxy_source=='provider' else proxy_source if proxy_source in ('auto','internal','provided') else 'auto'
         self.should_continue = None
         self.on_progress = None
         self.on_submitted = None

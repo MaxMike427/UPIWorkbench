@@ -24,7 +24,8 @@ async def import_from_txt(db, content: str, filename: str, admin_id: int | None 
 
 
 async def list_credentials(db, status: str | None = None, keyword: str | None = None,
-                           page: int = 1, page_size: int = 20) -> tuple[list[dict], int]:
+                           page: int = 1, page_size: int = 20,
+                           source_file: str | None = None) -> tuple[list[dict], int]:
     conds, args = [], []
     if status:
         conds.append("status=?")
@@ -32,6 +33,9 @@ async def list_credentials(db, status: str | None = None, keyword: str | None = 
     if keyword:
         conds.append("account LIKE ?")
         args.append(f"%{keyword}%")
+    if source_file is not None:
+        conds.append("COALESCE(source_file,'')=?")
+        args.append(source_file)
     where = ("WHERE " + " AND ".join(conds)) if conds else ""
     async with db.execute(f"SELECT COUNT(*) AS c FROM credentials {where}", args) as cur:
         total = (await cur.fetchone())["c"]
@@ -45,6 +49,12 @@ async def list_credentials(db, status: str | None = None, keyword: str | None = 
     ) as cur:
         rows = await cur.fetchall()
     return [dict(r) for r in rows], total
+
+
+async def list_sources(db) -> list[dict]:
+    async with db.execute("SELECT COALESCE(source_file,'') AS source_file,COUNT(*) AS total"
+                          " FROM credentials GROUP BY COALESCE(source_file,'') ORDER BY source_file") as cur:
+        return [dict(r) async for r in cur]
 
 
 async def export_credentials(db, status: str | None = None) -> str:

@@ -80,6 +80,16 @@ class BatchConfigUpdate(BaseModel):
     items: dict[str, str]
 
 
+class SupplierConfigUpdate(BaseModel):
+    flow_type: Literal["extract", "extract_pay"]
+    extract_provider: str = Field(min_length=1, max_length=80)
+    proxy_source: Literal["system", "provider"]
+    payment_provider: str = Field(default="", max_length=80)
+    sms_enabled: bool
+    sms_provider: str = Field(default="", max_length=80)
+    credentials: dict[str, Annotated[str, Field(max_length=4096)]] = Field(default_factory=dict, max_length=3)
+
+
 class BatchCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     credential_ids: list[int] = Field(min_length=1)
@@ -123,6 +133,12 @@ class ProxyImportRequest(BaseModel):
 
 class DynamicRequest(BaseModel):
     is_dynamic: bool = False
+
+
+class DynamicProxyConfig(BaseModel):
+    api_url: str = Field(default="", max_length=4096)
+    protocol: Literal["http", "https", "socks5"] = "http"
+    enabled: bool = False
 
 
 class ProxyIdsRequest(BaseModel):

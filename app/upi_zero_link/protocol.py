@@ -53,6 +53,27 @@ def _curl_code(exc: Exception) -> int:
     return int(match.group(1)) if match else 0
 
 
+def _safe_http_reason(response) -> str:
+    """Extract a short upstream reason without storing raw sensitive response data."""
+    try:
+        payload = response.json()
+    except Exception:
+        return ""
+    values = payload.values() if isinstance(payload, dict) else ()
+    for value in values:
+        if isinstance(value, dict):
+            value = next((value.get(key) for key in ("code", "error_code", "reason", "detail", "message") if value.get(key)), "")
+        if not isinstance(value, (str, int, float)):
+            continue
+        text = re.sub(r"https?://\S+", "<url>", str(value))
+        text = re.sub(r"[\w.+-]+@[\w.-]+", "<email>", text)
+        text = re.sub(r"(?:Bearer\s+|ohk_|eyJ)[A-Za-z0-9._:-]+", "<redacted>", text, flags=re.I)
+        text = re.sub(r"\s+", " ", text).strip()
+        if text:
+            return text[:120]
+    return ""
+
+
 def _scan(payload) -> dict:
     """在 Stripe 返回的嵌套 JSON 里找 UPI 交付物。
 
@@ -139,7 +160,11 @@ def extract(account: dict, proxy: str, *, tries: int = CONFIRM_ATTEMPTS,
         raise NetworkDown("checkout: %s" % str(exc)[:140])
 
     if checkout.status_code >= 400:
-        return {"ok": False, "error": "checkout_http_%s" % checkout.status_code}
+        result = {"ok": False, "error": "checkout_http_%s" % checkout.status_code}
+        reason = _safe_http_reason(checkout)
+        if reason:
+            result["upstream_code"] = reason
+        return result
     data = checkout.json() or {}
     cs = data.get("checkout_session_id")
     pk = data.get("publishable_key")

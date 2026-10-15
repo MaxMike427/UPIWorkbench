@@ -46,7 +46,7 @@ def _out(prog: dict) -> dict:
              'extract_provider':prog.get('extract_provider','ytc'),
              'payment_provider':prog.get('payment_provider','ytc'),
              'sms_provider':prog.get('sms_provider','handy'),
-             'ytc_proxy_source':prog.get('ytc_proxy_source','auto')}
+              'ytc_proxy_source':prog.get('ytc_proxy_source','auto')}
 
 
 @router.get("", response_model=PageOut[BatchOut])
@@ -135,14 +135,14 @@ async def _svc_or_400(db,bid=None) -> BatchService:
 @router.post("/{bid}/start")
 async def start_batch(bid: int, request: Request,
                       admin: dict = Depends(get_current_admin), db=Depends(get_db)):
-    svc = await _svc_or_400(db,bid)
-    prog = await svc.get_progress(bid)
+    prog = await BatchService(get_db_path()).get_progress(bid)
     if not prog:
         raise HTTPException(status_code=404, detail="批次不存在")
     if prog["status"] == "running":
         raise HTTPException(status_code=409, detail="批次已在运行中")
     if prog["status"] != "created":
         raise HTTPException(status_code=409, detail="已执行的任务不能再次启动，请使用继续或失败重试")
+    svc = await _svc_or_400(db,bid)
     db2 = await svc._connect()
     try:
         await svc._set_status(db2, bid, "running")
@@ -173,6 +173,9 @@ async def pause_batch(bid: int, request: Request,
 @router.post("/{bid}/resume")
 async def resume_batch(bid: int, request: Request,
                        admin: dict = Depends(get_current_admin), db=Depends(get_db)):
+    prog = await BatchService(get_db_path()).get_progress(bid)
+    if not prog: raise HTTPException(status_code=404, detail="批次不存在")
+    if prog['status'] != 'paused': raise HTTPException(status_code=400, detail="仅暂停任务可继续")
     svc = await _svc_or_400(db,bid)
     try:
         await svc.resume(bid)

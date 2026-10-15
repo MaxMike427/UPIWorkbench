@@ -316,11 +316,12 @@ def test_upi_step_uses_the_member_session_proxy(client,monkeypatch):
     assert used==[assigned]
 
 
-def test_proxy_api_fetch_endpoint_is_gone(client):
+def test_generic_proxy_api_fetch_endpoint_is_gone_and_711_uses_dedicated_config(client):
     h=_login(client)
     assert client.post('/api/proxies/fetch-api',headers=h,json={'url':'https://proxy.example.test/gen'}).status_code==405
     page=Path(__file__).parents[1].joinpath('static/index.html').read_text()
-    assert 'API 拉取' not in page and 'fetch-api' not in page
+    assert 'fetch-api' not in page
+    assert '/api/proxies/dynamic/fetch' in page
 
 
 def test_proxy_batch_test_reports_missing_ids(client,monkeypatch):
@@ -494,9 +495,9 @@ def test_integration_cannot_be_enabled_without_url_and_admin_key(client):
 def test_v110_version_file_matches_api(client):
     from pathlib import Path
     r=client.get('/api/health')
-    assert r.json()['version']=='1.2.0'
+    assert r.json()['version']=='1.3.0'
     root=Path(__file__).parents[1]
-    assert '1.2.0' in (root/'VERSION').read_text()
+    assert '1.3.0' in (root/'VERSION').read_text()
 
 
 def test_generic_config_cannot_bypass_integration_template_validation(client):
