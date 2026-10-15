@@ -110,6 +110,7 @@ def test_retry_failed_creates_a_new_task_and_preserves_original(client, monkeypa
     client.post("/api/credentials/import",
                 files={"file": ("accounts.txt", content, "text/plain")}, headers=h)
     ids = [client.get("/api/credentials", headers=h).json()["items"][0]["id"]]
+    client.put('/api/proxies',headers=h,json={'text':'http://proxy.example:8080','enabled':True})
     created = client.post("/api/batches", json={"name": "任务", "credential_ids": ids,
                                                   "amount": 100}, headers=h).json()
     source_id = created["id"]
@@ -182,6 +183,7 @@ def test_task_details_include_email_error_and_scoped_success_export(client):
 def test_retry_names_use_one_date_and_keep_source_lineage(client, monkeypatch):
     h = _login(client)
     _seed_success(client, h)
+    client.put('/api/proxies',headers=h,json={'text':'http://proxy.example:8080','enabled':True})
     today = datetime.now().strftime("%Y%m%d")
 
     async def seed():
@@ -219,7 +221,7 @@ def test_settings_do_not_expose_api_key_and_reject_masked_overwrite(client):
     assert "ohk_secret-test" not in json.dumps(all_configs)
     visible = client.get("/api/configs/workspace", headers=h)
     assert visible.status_code == 200
-    assert {c["key"] for c in visible.json()} == {"sms_provider.cdk", "upi_provider.cdk", "app.concurrency"}
+    assert {c["key"] for c in visible.json()} == {"sms_provider.cdk", "upi_provider.cdk", "extract_provider.cdk", "payment_provider.cdk", "sms_provider.provider", "upi_provider.provider", "extract_provider.provider", "payment_provider.provider", "ytc.proxy_source", "app.concurrency",'sms.enabled','sub2api.enabled','sub2api.base_url','sub2api.admin_key'}
     assert client.put("/api/configs/sms_provider.cdk", json={"value": "****"}, headers=h).status_code == 400
 
 

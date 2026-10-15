@@ -129,6 +129,7 @@ def test_dashboard_and_batches(client, monkeypatch):
     assert client.get("/api/dashboard/stats", headers=h).status_code == 200
     client.put("/api/configs/sms_provider.cdk", json={"value": "CDK"}, headers=h)
     client.put("/api/configs/upi_provider.cdk", json={"value": "ohk_test"}, headers=h)
+    client.put('/api/proxies',headers=h,json={'text':'http://proxy.example:8080','enabled':True})
     client.post("/api/credentials/import",files={"file":("test.txt","a@x.com---pw---2FA---eyJold\nb@x.com---pw---2FA---eyJold")},headers=h)
     r = client.post("/api/batches", json={"name": "t1", "credential_ids": [1, 2],
                                           "amount": 100}, headers=h)

@@ -8,6 +8,9 @@ data/account_exports/
 logs/
 doc/task_reports/
 doc/*账号*.txt
+doc/*卡密*.txt
+doc/*导出*.txt
+.serena/
 config.yaml
 .env
 

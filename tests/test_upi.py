@@ -62,7 +62,8 @@ async def _memdb():
         "CREATE TABLE upi_tasks (id INTEGER PRIMARY KEY AUTOINCREMENT,"
         " credential_id INTEGER NOT NULL, sms_task_id INTEGER, amount INTEGER NOT NULL, note TEXT,"
         " callback_url TEXT, upi_link TEXT, qr_code_data TEXT, status TEXT DEFAULT 'pending',"
-        " raw_response TEXT, error_msg TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
+        " raw_response TEXT, error_msg TEXT, external_job_id TEXT, external_job_secret TEXT,"
+        " payment_order_id TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,"
         " updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
     )
     await db.execute("INSERT INTO credentials(account, password, access_token)"

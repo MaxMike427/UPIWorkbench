@@ -1,0 +1,252 @@
+"""V1.2.0 服务商分离、本地提炼和任务级自动推送。"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+
+@pytest.fixture()
+def client(monkeypatch, tmp_path):
+    db_file = tmp_path / "v120.sqlite"
+    monkeypatch.setenv("UPI_DB_PATH", str(db_file))
+    monkeypatch.setenv("UPI_JWT_SECRET", "test-secret-12345678901234567890")
+    monkeypatch.setenv("UPI_ADMIN_USER", "admin")
+    monkeypatch.setenv("UPI_ADMIN_PASS", "admin123")
+    monkeypatch.setenv("UPI_REPORT_DIR", str(tmp_path / "reports"))
+    import app.config as cfg
+
+    cfg.get_settings.cache_clear()
+    from app.main import create_app
+
+    with TestClient(create_app()) as test_client:
+        test_client._v120_db_path = str(db_file)
+        yield test_client
+    cfg.get_settings.cache_clear()
+
+
+def login(client):
+    response = client.post("/api/auth/login", json={"username": "admin", "password": "admin123"})
+    assert response.status_code == 200, response.text
+    return {"Authorization": f"Bearer {response.json()['access_token']}"}
+
+
+def test_provider_catalog_endpoint_returns_detail_without_recursion(client):
+    headers = login(client)
+    response = client.get("/api/providers/ytc", headers=headers)
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == "ytc"
+    assert response.json()["combined"] is True
+
+
+def test_workspace_exposes_independent_extract_and_payment_settings(client):
+    headers = login(client)
+    response = client.get("/api/configs/workspace", headers=headers)
+    assert response.status_code == 200, response.text
+    keys = {item["key"] for item in response.json()}
+    assert {"extract_provider.provider", "extract_provider.cdk",
+            "payment_provider.provider", "payment_provider.cdk"} <= keys
+
+
+def test_ytc_uses_ohk_api_key_over_non_ytc_extract_cdk(client):
+    headers = login(client)
+    client.put("/api/configs/extract_provider.cdk",
+               json={"value": "LUMEN-CDK"}, headers=headers)
+    client.put("/api/configs/upi_provider.api_key",
+               json={"value": "ohk_legacy-api-key"}, headers=headers)
+
+    import aiosqlite
+    import asyncio
+    from app.services.batch_service import BatchService
+
+    async def load():
+        async with aiosqlite.connect(client._v120_db_path) as db:
+            db.row_factory = aiosqlite.Row
+            return (await BatchService.from_db(db, client._v120_db_path)).upi["ytc_api_key"]
+
+    assert asyncio.run(load()) == "ohk_legacy-api-key"
+
+
+@pytest.mark.asyncio
+async def test_ytc_builtin_proxy_mode_sends_internal_source(monkeypatch):
+    from app.services.upi_providers import YtcUPIProvider
+
+    sent = []
+
+    async def post(self, url, **kwargs):
+        sent.append(kwargs.get("json"))
+        return type("Response", (), {"status_code": 200, "json": lambda self: {"id": "job"}})()
+
+    monkeypatch.setattr("httpx.AsyncClient.post", post)
+    provider = YtcUPIProvider("https://ytc.example", "ohk_test", proxy_source="internal")
+    import httpx
+    async with httpx.AsyncClient() as client:
+        await provider.create_job(client, "eyJtoken", 1)
+    assert sent[0]["proxy_source"] == "internal"
+    assert "proxies" not in sent[0]
+
+
+def test_batch_snapshot_keeps_provider_choices_and_auto_push_flag(client):
+    headers = login(client)
+    content = "a@example.com---pw---2fa---eyJv120token\n"
+    imported = client.post(
+        "/api/credentials/import",
+        files={"file": ("accounts.txt", content, "text/plain")},
+        headers=headers,
+    )
+    assert imported.status_code == 200, imported.text
+    response = client.post(
+        "/api/batches",
+        json={"name": "provider-snapshot", "credential_ids": [1], "auto_push": False},
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+
+    import sqlite3
+
+    connection = sqlite3.connect(client._v120_db_path)
+    snapshot = connection.execute(
+        "SELECT snapshot_json FROM task_batches WHERE id=?", (response.json()["id"],)
+    ).fetchone()[0]
+    connection.close()
+    data = json.loads(snapshot)
+    assert data["auto_push"] is False
+    assert data["extract_provider"] == "ytc"
+    assert data["payment_provider"] == "ytc"
+
+
+def test_provider_selection_rejects_unintegrated_automatic_pair(client):
+    headers = login(client)
+    assert client.put("/api/configs/extract_provider.provider",
+                      json={"value": "lumen"}, headers=headers).status_code == 200
+    assert client.put("/api/configs/payment_provider.provider",
+                      json={"value": "masi"}, headers=headers).status_code == 200
+    content = "a@example.com---pw---2fa---eyJv120pair\n"
+    assert client.post("/api/credentials/import",
+                       files={"file": ("accounts.txt", content, "text/plain")},
+                       headers=headers).status_code == 200
+    batch = client.post("/api/batches", json={"name": "unsupported-pair", "credential_ids": [1]}, headers=headers)
+    assert batch.status_code == 200
+    start = client.post(f"/api/batches/{batch.json()['id']}/start", headers=headers)
+    assert start.status_code == 400
+    assert "组合未接入" in start.json()["detail"]
+
+
+def test_legacy_batch_listing_defaults_new_snapshot_fields_to_strings(client):
+    headers = login(client)
+    import sqlite3
+
+    connection = sqlite3.connect(client._v120_db_path)
+    connection.execute(
+        "INSERT INTO task_batches(name,total_credentials,status,current_step,progress_json,snapshot_json) "
+        "VALUES(?,?,?,?,?,?)",
+        ("legacy", 0, "created", "created", "{}", '{"sms_enabled":true}'),
+    )
+    connection.commit()
+    batch_id = connection.execute("SELECT last_insert_rowid()").fetchone()[0]
+    connection.close()
+
+    listing = client.get("/api/batches", headers=headers)
+    assert listing.status_code == 200, listing.text
+    item = next(row for row in listing.json()["items"] if row["id"] == batch_id)
+    assert item["extract_provider"] == "ytc"
+    assert item["payment_provider"] == "ytc"
+    assert item["sms_provider"] == "handy"
+    assert item["ytc_proxy_source"] == "provided"
+
+    detail = client.get(f"/api/batches/{batch_id}", headers=headers)
+    assert detail.status_code == 200, detail.text
+
+
+def test_ytc_builtin_proxy_does_not_require_local_proxy_pool(client, monkeypatch):
+    headers = login(client)
+    from app.api import upi_router
+
+    async def fake_settings(db):
+        return {
+            "provider": "ytc", "extract_provider": "ytc", "payment_provider": "ytc",
+            "base_url": "https://ytc.example", "payment_base_url": "https://masi.example",
+            "payment_cdk": "", "key": "ohk_test", "ytc_proxy_source": "provider",
+        }
+
+    monkeypatch.setattr(upi_router, "_provider_settings", fake_settings)
+    # The helper itself is the regression boundary: built-in mode returns no
+    # caller-supplied proxies instead of rejecting an empty local pool.
+    import asyncio
+    async def read():
+        import aiosqlite
+        async with aiosqlite.connect(client._v120_db_path) as db:
+            return await upi_router._ytc_proxies(db, "ytc", "provider")
+    assert asyncio.run(read()) == []
+
+
+@pytest.mark.asyncio
+async def test_ytc_auto_proxy_uses_local_pool_when_enabled():
+    from app.services.batch_service import _uses_external_ytc_proxy
+    assert _uses_external_ytc_proxy({"extract_provider": "ytc", "ytc_proxy_source": "auto",
+                                     "proxy_enabled": True, "proxies": ["http://proxy.example:80"]})
+    assert not _uses_external_ytc_proxy({"extract_provider": "ytc", "ytc_proxy_source": "auto",
+                                         "proxy_enabled": False, "proxies": []})
+
+
+@pytest.mark.asyncio
+async def test_local_provider_passes_account_email_and_proxy_to_protocol():
+    from app.services.upi_providers import LocalUPIProvider
+
+    seen = {}
+
+    def fake_extract(account, proxy):
+        seen.update(account=account, proxy=proxy)
+        return {"ok": True, "url": "https://upi.example/link", "due": 0}
+
+    provider = LocalUPIProvider(proxies=["socks5://proxy.example:1080"], extract_func=fake_extract)
+    link, raw = await provider.fetch_link("eyJtoken", account_email="a@example.com")
+    assert link == "https://upi.example/link"
+    assert raw["provider"] == "local"
+    assert seen == {
+        "account": {"email": "a@example.com", "access_token": "eyJtoken", "session_token": ""},
+        "proxy": "socks5://proxy.example:1080",
+    }
+
+
+@pytest.mark.asyncio
+async def test_masi_payment_provider_submits_and_waits_for_completed_order(monkeypatch):
+    from app.services.upi_providers import MasiPaymentProvider
+
+    calls = []
+
+    class Response:
+        def __init__(self, status_code, body):
+            self.status_code = status_code
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    class Client:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return False
+
+        async def post(self, path, **kwargs):
+            calls.append(("post", path, kwargs))
+            return Response(201, {"ok": True, "order": {"order_id": "ord-1"}, "order_secret": "secret-1"})
+
+        async def get(self, path, **kwargs):
+            calls.append(("get", path, kwargs))
+            return Response(200, {"ok": True, "order": {"status": "completed"}})
+
+    monkeypatch.setattr("app.services.upi_providers.httpx.AsyncClient", lambda **kwargs: Client())
+    provider = MasiPaymentProvider("https://masi.example", "KSCAN-test", poll_interval=0)
+    result = await provider.create_or_wait(
+        "https://payments.stripe.com/upi/instructions/link",
+        "eyJtoken",
+        "a@example.com",
+    )
+    assert result["status"] == "success"
+    assert result["order_id"] == "ord-1"
+    assert calls[0][0] == "post" and calls[1][0] == "get"

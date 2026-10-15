@@ -1,9 +1,9 @@
 """Pydantic 请求/响应模型。"""
 from __future__ import annotations
 
-from typing import Any, Generic, Literal, TypeVar
+from typing import Annotated, Any, Generic, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 T = TypeVar("T")
 
@@ -80,11 +80,22 @@ class BatchConfigUpdate(BaseModel):
     items: dict[str, str]
 
 
+class SupplierConfigUpdate(BaseModel):
+    flow_type: Literal["extract", "extract_pay"]
+    extract_provider: str = Field(min_length=1, max_length=80)
+    proxy_source: Literal["system", "provider"]
+    payment_provider: str = Field(default="", max_length=80)
+    sms_enabled: bool
+    sms_provider: str = Field(default="", max_length=80)
+    credentials: dict[str, Annotated[str, Field(max_length=4096)]] = Field(default_factory=dict, max_length=3)
+
+
 class BatchCreate(BaseModel):
     name: str = Field(min_length=1, max_length=128)
     credential_ids: list[int] = Field(min_length=1)
     amount: int = Field(default=0, ge=0, description="提链金额(paise)")
     note: str = ""
+    auto_push: bool = True
 
 
 class BatchOut(BaseModel):
@@ -99,6 +110,63 @@ class BatchOut(BaseModel):
     members: list[dict] = Field(default_factory=list)
     source_batch_id: int | None = None
     report_available: bool = False
+    sms_enabled: bool = True
+    proxy_enabled: bool = False
+    integration_enabled: bool = False
+    auto_push: bool = True
+    extract_provider: str = "ytc"
+    payment_provider: str = "ytc"
+    sms_provider: str = "handy"
+    ytc_proxy_source: str = "auto"
+
+
+class ProxyUpdate(BaseModel):
+    text: str = Field(max_length=200000)
+    enabled: bool = False
+
+
+class ProxyImportRequest(BaseModel):
+    text: str = Field(min_length=1, max_length=200000)
+    enabled: bool = False
+    is_dynamic: bool = False
+
+
+class DynamicRequest(BaseModel):
+    is_dynamic: bool = False
+
+
+class DynamicProxyConfig(BaseModel):
+    api_url: str = Field(default="", max_length=4096)
+    protocol: Literal["http", "https", "socks5"] = "http"
+    enabled: bool = False
+
+
+class ProxyIdsRequest(BaseModel):
+    ids: list[int] = Field(min_length=1, max_length=5000)
+
+
+class ToggleRequest(BaseModel):
+    enabled: bool
+
+
+class IntegrationTemplate(BaseModel):
+    group_ids: list[Annotated[int, Field(strict=True,gt=0)]] = Field(default_factory=list,max_length=100)
+    concurrency: int = Field(default=3, ge=1, le=1000, strict=True)
+    rate_multiplier: float = Field(default=1.0, ge=0, le=1000, allow_inf_nan=False)
+    models: list[str] = Field(default_factory=list,max_length=200)
+    update_existing: bool = False
+
+    @field_validator('group_ids')
+    @classmethod
+    def unique_groups(cls,values):
+        return list(dict.fromkeys(values))
+
+    @field_validator('models')
+    @classmethod
+    def valid_models(cls,values):
+        if any(not m.strip() or len(m)>100 or any(ord(c)<32 for c in m) for m in values):
+            raise ValueError('模型名称无效')
+        return list(dict.fromkeys(m.strip() for m in values))
 
 
 class DashboardStats(BaseModel):

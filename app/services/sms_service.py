@@ -81,13 +81,14 @@ class SMSBatchResult:
 
 
 class SMSService:
-    def __init__(self, db, base_url: str, cdk: str, fmt: str = "cpa",
+    def __init__(self, db, base_url: str, cdk: str, fmt: str = "cpa", provider: str = "handy",
                  concurrency: int = 2, poll_interval: float = 5.0,
                  timeout: float = 600.0, max_retries: int | None = 5,
                  retry_interval: float = 120.0):
         self.db = db
         self.base_url = base_url.rstrip("/")
         self.cdk = cdk or ""
+        self.provider = provider
         self.fmt = fmt
         self.concurrency = max(1, concurrency)
         self.poll_interval = poll_interval

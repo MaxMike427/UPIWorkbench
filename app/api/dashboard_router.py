@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from ..auth import get_current_admin
 from ..config import get_settings
 from ..database import get_db
-from ..services.success_service import count_successes
+from ..services.success_service import count_successes,count_full_successes
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
@@ -24,9 +24,10 @@ async def stats(admin: dict = Depends(get_current_admin), db=Depends(get_db)):
     async with db.execute("SELECT COUNT(*) AS c FROM upi_tasks") as cur:
         upi = (await cur.fetchone())["c"]
     success = await count_successes(db)
+    full=await count_full_successes(db)
     return {"credentials_total": total, "by_status": by_status,
             "batches_total": batches, "sms_total": sms, "upi_total": upi,
-            "success_total": success}
+            "success_total": success,'full_success_total':full,'paid_without_sms_total':success-full}
 
 
 @router.get("/meta")

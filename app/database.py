@@ -106,6 +106,7 @@ CREATE TABLE IF NOT EXISTS account_exports (
 );
 CREATE INDEX IF NOT EXISTS idx_exports_credential ON account_exports(credential_id,format);
 CREATE INDEX IF NOT EXISTS idx_credentials_status ON credentials(status);
+CREATE INDEX IF NOT EXISTS idx_credentials_source ON credentials(source_file);
 CREATE INDEX IF NOT EXISTS idx_sms_tasks_credential ON sms_tasks(credential_id);
 CREATE INDEX IF NOT EXISTS idx_upi_tasks_credential ON upi_tasks(credential_id);
 CREATE INDEX IF NOT EXISTS idx_batches_status ON task_batches(status);
@@ -113,11 +114,36 @@ CREATE TABLE IF NOT EXISTS batch_members (
     batch_id INTEGER NOT NULL REFERENCES task_batches(id),
     credential_id INTEGER NOT NULL REFERENCES credentials(id),
     stage TEXT DEFAULT 'pending',
+    proxy_url TEXT,
     error TEXT,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (batch_id, credential_id)
 );
 CREATE INDEX IF NOT EXISTS idx_batch_members_batch ON batch_members(batch_id);
+CREATE TABLE IF NOT EXISTS proxies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    url TEXT NOT NULL,
+    protocol TEXT NOT NULL,
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL,
+    is_dynamic INTEGER NOT NULL DEFAULT 0,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS integration_pushes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    credential_id INTEGER NOT NULL REFERENCES credentials(id),
+    batch_id INTEGER REFERENCES task_batches(id),
+    instance_url TEXT NOT NULL,
+    fingerprint TEXT NOT NULL,
+    template_json TEXT NOT NULL,
+    status TEXT DEFAULT 'pending',
+    attempt_count INTEGER DEFAULT 0,
+    remote_account_id INTEGER,
+    error_msg TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(instance_url, credential_id, fingerprint)
+);
 """
 
 _MIGRATIONS = [
@@ -131,19 +157,42 @@ _MIGRATIONS = [
     ("batch_members", "upi_task_id", "ALTER TABLE batch_members ADD COLUMN upi_task_id INTEGER REFERENCES upi_tasks(id)"),
     ("batch_members", "sms_task_id", "ALTER TABLE batch_members ADD COLUMN sms_task_id INTEGER REFERENCES sms_tasks(id)"),
     ("upi_tasks", "external_job_id", "ALTER TABLE upi_tasks ADD COLUMN external_job_id TEXT"),
+    ("upi_tasks", "external_job_secret", "ALTER TABLE upi_tasks ADD COLUMN external_job_secret TEXT"),
+    ("upi_tasks", "payment_order_id", "ALTER TABLE upi_tasks ADD COLUMN payment_order_id TEXT"),
     ("task_batches", "deleted_at", "ALTER TABLE task_batches ADD COLUMN deleted_at TEXT"),
+    ("task_batches", "snapshot_json", "ALTER TABLE task_batches ADD COLUMN snapshot_json TEXT"),
+    ("integration_pushes", "next_attempt_at", "ALTER TABLE integration_pushes ADD COLUMN next_attempt_at REAL DEFAULT 0"),
+    ("proxies", "is_dynamic", "ALTER TABLE proxies ADD COLUMN is_dynamic INTEGER NOT NULL DEFAULT 0"),
+    ("batch_members", "proxy_url", "ALTER TABLE batch_members ADD COLUMN proxy_url TEXT"),
 ]
 
 DEFAULT_CONFIGS = [
+    ("proxy.enabled", "false", "启用代理库"),
+    ("proxy.dynamic.api_url", "", "711proxy API 提取 URL（敏感）"),
+    ("proxy.dynamic.protocol", "http", "711proxy 返回代理协议"),
+    ("proxy.dynamic.enabled", "false", "新任务启动前自动取动态代理"),
+    ("sms.enabled", "true", "启用接码"),
+    ("sub2api.enabled", "false", "启用 sub2api 推送"),
+    ("sub2api.base_url", "", "sub2api 实例 URL"),
+    ("sub2api.admin_key", "", "sub2api 管理员 Admin Key"),
+    ("sub2api.template", '{"group_ids":[],"concurrency":3,"rate_multiplier":1.0,"models":[],"update_existing":false}', "sub2api 推送模板"),
+    ("extract_provider.provider", "ytc", "提炼服务商"),
+    ("extract_provider.base_url", "https://ytc.xxsyun.xyz", "提炼平台接口地址"),
+    ("extract_provider.cdk", "", "提炼平台兑换码"),
+    ("ytc.proxy_source", "auto", "ytc 代理来源（auto/provider/provided）"),
+    ("payment_provider.provider", "ytc", "支付服务商"),
+    ("payment_provider.base_url", "https://masi.cc.cd", "支付平台接口地址"),
+    ("payment_provider.cdk", "", "支付平台兑换码"),
     ("app.concurrency", "3", "并发控制"),
     ("sms_provider.cdk", "", "接码平台兑换码"),
     ("upi_provider.cdk", "", "备用提链平台兑换码"),
     ("qualification.api_url", "https://cha.nerver.cc", "资格检查接口地址"),
     ("qualification.api_key", "", "资格检查访问密钥"),
     ("qualification.promo_id", "plus-1-month-free", "优惠活动编号"),
+    ("sms_provider.provider", "handy", "接码服务商"),
     ("sms_provider.base_url", "https://apihub.space/handy", "接码平台接口地址"),
+    ("upi_provider.provider", "ytc", "提炼/支付服务商"),
     ("upi_provider.base_url", "https://ytc.xxsyun.xyz", "提链平台接口地址"),
-    ("upi_provider.provider", "ytc", "提链服务商（ytc 主服务 / nerver 备用）"),
     ("upi_provider.api_key", "", "提链平台访问密钥（ohk_ 开头）"),
 ]
 
@@ -165,6 +214,8 @@ async def init_db(db_path: str | None = None) -> str:
                 cols = [r[1] async for r in cur]
             if column not in cols:
                 await db.execute(sql)
+        await db.execute('CREATE INDEX IF NOT EXISTS idx_integration_queue ON integration_pushes(status,instance_url,next_attempt_at,id)')
+        await db.execute("UPDATE configs SET value='local' WHERE key='extract_provider.provider' AND value='local_zero_link'")
         await db.execute("UPDATE credentials SET original_access_token=access_token WHERE original_access_token IS NULL")
         await db.execute("UPDATE batch_members SET at_snapshot=(SELECT original_access_token FROM credentials WHERE id=credential_id) WHERE at_snapshot IS NULL")
         await db.commit()
